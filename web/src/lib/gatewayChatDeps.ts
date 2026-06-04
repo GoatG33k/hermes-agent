@@ -58,6 +58,15 @@ export function createGatewayChatDeps(): ChatStoreDeps {
 
   async function gateway(): Promise<GatewayClient> {
     if (gw && gw.state === "open") return gw;
+    // Dispose any prior (closed/errored) client before replacing it so we
+    // don't leak its socket + event listeners across reconnects.
+    if (gw) {
+      try {
+        gw.close();
+      } catch {
+        /* already closed */
+      }
+    }
     gw = new GatewayClient();
     await gw.connect();
     return gw;
@@ -74,10 +83,13 @@ export function createGatewayChatDeps(): ChatStoreDeps {
       if (opts?.profile) params.profile = opts.profile;
       const created = await client.request<{
         session_id: string;
-        // The DB-backed key the REST `/api/sessions*` endpoints key on. This —
-        // not the ephemeral gateway `session_id` — is what we must persist and
-        // list against, otherwise the new chat never shows up in the registry
-        // and its transcript can't be fetched later.
+        // The DB-backed session id (the `sessions.id` column). This is the id
+        // space shared by `session.list`, `session.delete`, and the REST
+        // `/api/sessions*` endpoints — verified against tui_gateway/server.py
+        // (`session.delete` → `db.delete_session` deletes `WHERE id = ?`) and
+        // hermes_state.py. We persist and operate on THIS id, not the
+        // ephemeral in-process `session_id`, so the chat shows up in the
+        // listing and its transcript / deletion target the right row.
         stored_session_id?: string;
         title?: string | null;
         info?: { model?: string | null };
@@ -98,6 +110,10 @@ export function createGatewayChatDeps(): ChatStoreDeps {
 
     async deleteSession(id) {
       const client = await gateway();
+      // `id` is the stored `sessions.id` (see createSession's note). The
+      // gateway's `session.delete` param is named `session_id` but operates on
+      // this stored id (`db.delete_session` → `DELETE … WHERE id = ?`), so the
+      // store's canonical id is exactly the right value to pass here.
       await client.request("session.delete", { session_id: id });
     },
 

@@ -231,11 +231,67 @@ describe("ChatStore — messages per session", () => {
     expect(state.sessions[0]?.messageCount).toBe(1);
   });
 
+  it("appendMessage re-sorts so the active session moves to the front", async () => {
+    const backend = makeFakeBackend();
+    const store = new ChatStore(backend.deps, makeMemoryPersistence());
+    // Two sessions; s1 created first, s2 second (s2 ends up active + first).
+    await store.createSession(); // s1
+    await store.createSession(); // s2 (active)
+    // Re-select the older s1 so it becomes active but is NOT first in order.
+    await store.selectSession("s1");
+
+    store.appendMessage({
+      role: "user",
+      content: "bump s1",
+      timestamp: Math.floor(Date.now() / 1000) + 1000,
+    });
+
+    // s1 must now be first by the "newest activity first" invariant.
+    expect(store.getSnapshot().sessions[0]?.id).toBe("s1");
+  });
+
   it("clears messages when no session is active", async () => {
     const backend = makeFakeBackend();
     const store = new ChatStore(backend.deps, makeMemoryPersistence());
     await store.loadActiveMessages();
     expect(store.getSnapshot().messages).toEqual([]);
+  });
+
+  it("a superseded loadMessages cannot clobber a newer load's result", async () => {
+    // Two sessions whose loadMessages resolve out of order. The slow first
+    // request must NOT overwrite the fast second request's transcript.
+    const resolvers: Record<string, (msgs: ChatMessage[]) => void> = {};
+    const deps: ChatStoreDeps = {
+      async createSession() {
+        const id = Object.keys(resolvers).length === 0 ? "slow" : "fast";
+        return { id };
+      },
+      async listSessions() {
+        return [session("slow"), session("fast")];
+      },
+      async deleteSession() {},
+      loadMessages(id) {
+        return new Promise<ChatMessage[]>((resolve) => {
+          resolvers[id] = resolve;
+        });
+      },
+    };
+    const store = new ChatStore(deps, makeMemoryPersistence());
+    await store.refreshSessions();
+
+    // Kick off load for "slow", then immediately switch to "fast".
+    const slowLoad = store.selectSession("slow");
+    const fastLoad = store.selectSession("fast");
+
+    // Resolve fast first, then slow (the stale one).
+    resolvers["fast"]?.([{ role: "assistant", content: "FAST" }]);
+    resolvers["slow"]?.([{ role: "assistant", content: "SLOW" }]);
+    await Promise.all([slowLoad, fastLoad]);
+
+    const state = store.getSnapshot();
+    expect(state.activeSessionId).toBe("fast");
+    expect(state.messages).toEqual([{ role: "assistant", content: "FAST" }]);
+    expect(state.loading).toBe(false);
   });
 });
 

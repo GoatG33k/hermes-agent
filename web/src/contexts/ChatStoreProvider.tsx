@@ -6,11 +6,14 @@ import { ChatStoreContext } from "@/contexts/chat-store-context";
 
 interface ChatStoreProviderProps {
   children: ReactNode;
-  /** Override the backend wiring (tests inject fakes). Defaults to the real
-   *  gateway + REST deps. */
-  deps?: ChatStoreDeps;
-  /** Override persistence (tests inject an in-memory store). */
-  persistence?: ChatStorePersistence;
+  /** Backend wiring used to construct the store. Read **once** at mount;
+   *  later changes are intentionally ignored (the store is a stable
+   *  singleton). Tests inject fakes here. Defaults to the real gateway +
+   *  REST deps. */
+  initialDeps?: ChatStoreDeps;
+  /** Persistence used to construct the store. Read **once** at mount; later
+   *  changes are ignored. Tests inject an in-memory store. */
+  initialPersistence?: ChatStorePersistence;
   /** Set false to skip the initial server hydration (tests / storybook). */
   autoHydrate?: boolean;
 }
@@ -23,17 +26,22 @@ interface ChatStoreProviderProps {
  *
  * Mount this inside `BrowserRouter` (alongside the other app providers) so the
  * pinned chat widget and any page can read the same store.
+ *
+ * Note: `initialDeps` / `initialPersistence` are construction-time only. The
+ * store is deliberately a stable singleton for the app's lifetime, so swapping
+ * these props after mount has no effect (the `initial` prefix signals this).
  */
 export function ChatStoreProvider({
   children,
-  deps,
-  persistence,
+  initialDeps,
+  initialPersistence,
   autoHydrate = true,
 }: ChatStoreProviderProps) {
-  // One store for the app's lifetime. `useMemo` with a stable dep keeps the
-  // same instance across re-renders; deps/persistence are only read once.
+  // One store for the app's lifetime. `useMemo` with an empty dep array keeps
+  // the same instance across re-renders; the initial deps/persistence are
+  // captured once here by design (see the prop docs above).
   const store = useMemo(
-    () => new ChatStore(deps ?? createGatewayChatDeps(), persistence),
+    () => new ChatStore(initialDeps ?? createGatewayChatDeps(), initialPersistence),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );

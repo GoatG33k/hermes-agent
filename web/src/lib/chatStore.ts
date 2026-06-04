@@ -219,6 +219,10 @@ function sortSessions(sessions: ChatSession[]): ChatSession[] {
 export class ChatStore {
   private state: ChatStoreState = INITIAL_STATE;
   private listeners = new Set<() => void>();
+  /** Monotonic token for message loads; only the latest load may mutate
+   *  `messages`/`loading`, so a slow request for a since-abandoned session
+   *  can't clobber a newer one's result or loading flag. */
+  private loadToken = 0;
   private readonly deps: ChatStoreDeps;
   private readonly persistence: ChatStorePersistence;
 
@@ -388,17 +392,17 @@ export class ChatStore {
       this.setState({ messages: [] });
       return;
     }
+    const token = ++this.loadToken;
     this.setState({ loading: true, error: null });
     try {
       const messages = await this.deps.loadMessages(id);
-      // Guard against a race: the active session may have changed while the
-      // request was in flight.
-      if (this.state.activeSessionId !== id) {
-        this.setState({ loading: false });
-        return;
-      }
+      // Only the most recent load may mutate state. A superseded request
+      // (the user switched sessions, or fired another reload) must not flip
+      // `loading` off or overwrite the newer transcript.
+      if (token !== this.loadToken) return;
       this.setState({ messages, loading: false });
     } catch (e) {
+      if (token !== this.loadToken) return;
       this.setState({ loading: false, error: errMsg(e) });
     }
   }
@@ -412,21 +416,24 @@ export class ChatStore {
   appendMessage(message: ChatMessage): void {
     if (!this.state.activeSessionId) return;
     const id = this.state.activeSessionId;
+    const updated = this.state.sessions.map((s) =>
+      s.id === id
+        ? {
+            ...s,
+            lastActive: message.timestamp ?? Math.floor(Date.now() / 1000),
+            messageCount: s.messageCount + 1,
+            preview:
+              typeof message.content === "string"
+                ? message.content.slice(0, 140)
+                : s.preview,
+          }
+        : s,
+    );
     this.setState({
       messages: [...this.state.messages, message],
-      sessions: this.state.sessions.map((s) =>
-        s.id === id
-          ? {
-              ...s,
-              lastActive: message.timestamp ?? Math.floor(Date.now() / 1000),
-              messageCount: s.messageCount + 1,
-              preview:
-                typeof message.content === "string"
-                  ? message.content.slice(0, 140)
-                  : s.preview,
-            }
-          : s,
-      ),
+      // Re-sort so the "newest activity first" invariant documented on
+      // `ChatStoreState.sessions` holds after activity in a non-first session.
+      sessions: sortSessions(updated),
     });
   }
 
