@@ -31,6 +31,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
+import time
+import uuid
 from typing import Any, Optional
 
 from tools.registry import registry, tool_error
@@ -1414,6 +1417,277 @@ KANBAN_LINK_SCHEMA = {
 
 
 # ---------------------------------------------------------------------------
+# Plan preview / approve (two-phase decomposition)
+# ---------------------------------------------------------------------------
+
+_PLAN_TTL_SECONDS = 1800  # 30 minutes — plans are ephemeral staging areas
+_plan_store: dict[str, dict] = {}
+_plan_lock = threading.Lock()
+
+
+def _plan_sweep() -> None:
+    """Evict expired plans. Call while holding _plan_lock."""
+    cutoff = time.time() - _PLAN_TTL_SECONDS
+    expired = [k for k, v in _plan_store.items() if v["created_at"] < cutoff]
+    for k in expired:
+        del _plan_store[k]
+
+
+def _topo_sort(n: int, depends_on: list[list[int]]) -> list[int]:
+    """Kahn's algorithm over task indices. Returns creation order."""
+    in_degree = [0] * n
+    adj: list[list[int]] = [[] for _ in range(n)]
+    for i, deps in enumerate(depends_on):
+        for d in deps:
+            adj[d].append(i)
+            in_degree[i] += 1
+    queue = [i for i in range(n) if in_degree[i] == 0]
+    order: list[int] = []
+    while queue:
+        cur = queue.pop(0)
+        order.append(cur)
+        for nb in adj[cur]:
+            in_degree[nb] -= 1
+            if in_degree[nb] == 0:
+                queue.append(nb)
+    if len(order) != n:
+        raise ValueError("depends_on graph contains a cycle")
+    return order
+
+
+def _handle_plan_preview(args: dict, **kw) -> str:
+    guard = _require_orchestrator_tool("kanban_plan_preview")
+    if guard:
+        return guard
+
+    raw_tasks = args.get("tasks")
+    if not raw_tasks or not isinstance(raw_tasks, list):
+        return tool_error("tasks must be a non-empty list of task specs")
+    if len(raw_tasks) > 50:
+        return tool_error("tasks list exceeds maximum of 50 entries per plan")
+
+    validated: list[dict] = []
+    for i, t in enumerate(raw_tasks):
+        if not isinstance(t, dict):
+            return tool_error(f"tasks[{i}]: must be an object")
+        title = t.get("title")
+        assignee = t.get("assignee")
+        if not title:
+            return tool_error(f"tasks[{i}]: title is required")
+        if not assignee:
+            return tool_error(f"tasks[{i}]: assignee is required")
+        depends_on = t.get("depends_on") or []
+        if not isinstance(depends_on, list):
+            return tool_error(f"tasks[{i}]: depends_on must be a list of integer indices")
+        for d in depends_on:
+            if not isinstance(d, int) or d < 0 or d >= len(raw_tasks):
+                return tool_error(
+                    f"tasks[{i}]: depends_on index {d} is out of range "
+                    f"(must be 0–{len(raw_tasks) - 1})"
+                )
+            if d == i:
+                return tool_error(f"tasks[{i}]: depends_on cannot reference itself")
+        validated.append({
+            "title":               str(title).strip(),
+            "assignee":            str(assignee).strip(),
+            "body":                t.get("body"),
+            "parents":             list(t.get("parents") or []),
+            "priority":            t.get("priority"),
+            "workspace_kind":      t.get("workspace_kind") or "scratch",
+            "workspace_path":      t.get("workspace_path"),
+            "triage":              t.get("triage"),
+            "idempotency_key":     t.get("idempotency_key"),
+            "max_runtime_seconds": t.get("max_runtime_seconds"),
+            "skills":              t.get("skills"),
+            "goal_mode":           t.get("goal_mode"),
+            "goal_max_turns":      t.get("goal_max_turns"),
+            "depends_on":          depends_on,
+        })
+
+    try:
+        _topo_sort(len(validated), [t["depends_on"] for t in validated])
+    except ValueError as e:
+        return tool_error(str(e))
+
+    plan_id = uuid.uuid4().hex
+    board = args.get("board")
+
+    with _plan_lock:
+        _plan_sweep()
+        _plan_store[plan_id] = {
+            "tasks":      validated,
+            "board":      board,
+            "created_at": time.time(),
+        }
+
+    lines = [f"Plan {plan_id} — {len(validated)} task(s) staged (not yet created):"]
+    for i, t in enumerate(validated):
+        dep_str = f" ← after [{', '.join(str(d) for d in t['depends_on'])}]" if t["depends_on"] else ""
+        parent_str = f" (child of {', '.join(t['parents'])})" if t["parents"] else ""
+        lines.append(f"  [{i}] {t['title']} → {t['assignee']}{parent_str}{dep_str}")
+        if t["body"]:
+            preview = t["body"][:100].replace("\n", " ")
+            ellipsis = "…" if len(t["body"]) > 100 else ""
+            lines.append(f"       {preview}{ellipsis}")
+    lines.append(f'\nCall kanban_plan_approve(plan_id="{plan_id}") to create these tasks.')
+
+    return _ok(plan_id=plan_id, task_count=len(validated), preview="\n".join(lines))
+
+
+def _handle_plan_approve(args: dict, **kw) -> str:
+    guard = _require_orchestrator_tool("kanban_plan_approve")
+    if guard:
+        return guard
+
+    plan_id = args.get("plan_id")
+    if not plan_id:
+        return tool_error("plan_id is required")
+
+    with _plan_lock:
+        _plan_sweep()
+        plan = _plan_store.pop(str(plan_id), None)
+
+    if plan is None:
+        return tool_error(
+            f"plan {plan_id!r} not found — it may have expired (TTL {_PLAN_TTL_SECONDS}s) "
+            "or already been approved. Call kanban_plan_preview again to stage a new plan."
+        )
+
+    tasks = plan["tasks"]
+    board = args.get("board") or plan["board"]
+    session_id = os.environ.get("HERMES_SESSION_ID")
+    created_by = os.environ.get("HERMES_PROFILE") or "worker"
+
+    order = _topo_sort(len(tasks), [t["depends_on"] for t in tasks])
+    # Maps plan index → created task id, for resolving intra-plan depends_on.
+    index_to_tid: dict[int, str] = {}
+    created: list[dict] = []
+
+    try:
+        kb, conn = _connect(board=board)
+        try:
+            for i in order:
+                t = tasks[i]
+                # Merge external parents with intra-plan resolved parents.
+                parents = list(t["parents"])
+                for dep_idx in t["depends_on"]:
+                    dep_tid = index_to_tid.get(dep_idx)
+                    if dep_tid:
+                        parents.append(dep_tid)
+
+                new_tid = kb.create_task(
+                    conn,
+                    title=t["title"],
+                    body=t["body"],
+                    assignee=t["assignee"],
+                    parents=tuple(parents),
+                    priority=int(t["priority"]) if t["priority"] is not None else 0,
+                    workspace_kind=t["workspace_kind"],
+                    workspace_path=t["workspace_path"],
+                    triage=t["triage"] or False,
+                    idempotency_key=t["idempotency_key"],
+                    max_runtime_seconds=(
+                        int(t["max_runtime_seconds"])
+                        if t["max_runtime_seconds"] is not None else None
+                    ),
+                    skills=t["skills"],
+                    goal_mode=t["goal_mode"] or False,
+                    goal_max_turns=(
+                        int(t["goal_max_turns"])
+                        if t["goal_max_turns"] is not None else None
+                    ),
+                    initial_status="running",
+                    created_by=created_by,
+                    session_id=session_id,
+                )
+                index_to_tid[i] = new_tid
+                created.append({"index": i, "title": t["title"], "task_id": new_tid})
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.exception("kanban_plan_approve failed")
+        return tool_error(f"kanban_plan_approve: {e}")
+
+    return _ok(created=created, task_count=len(created))
+
+
+KANBAN_PLAN_PREVIEW_SCHEMA = {
+    "name": "kanban_plan_preview",
+    "description": (
+        "Stage a multi-task decomposition plan for human review before any "
+        "tasks are created. Returns a plan_id and a formatted summary of the "
+        "proposed tasks. Nothing is written to the board until "
+        "kanban_plan_approve is called with that plan_id. Plans expire after "
+        f"{_PLAN_TTL_SECONDS // 60} minutes."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "tasks": {
+                "type": "array",
+                "description": "Ordered list of tasks to create. Maximum 50.",
+                "items": {
+                    "type": "object",
+                    "required": ["title", "assignee"],
+                    "properties": {
+                        "title":    {"type": "string", "description": "Short task title."},
+                        "assignee": {"type": "string", "description": "Profile that will execute this task."},
+                        "body":     {"type": "string", "description": "Full spec / acceptance criteria."},
+                        "depends_on": {
+                            "type": "array",
+                            "items": {"type": "integer"},
+                            "description": (
+                                "Zero-based indices of other tasks in this plan that must be "
+                                "created first and added as parents. E.g. [0, 1] means this task "
+                                "won't start until tasks 0 and 1 complete."
+                            ),
+                        },
+                        "parents": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Existing task IDs to add as parents (outside this plan).",
+                        },
+                        "priority":            {"type": "integer"},
+                        "workspace_kind":      {"type": "string", "enum": ["scratch", "dir", "worktree"]},
+                        "workspace_path":      {"type": "string"},
+                        "triage":              {"type": "boolean"},
+                        "idempotency_key":     {"type": "string"},
+                        "max_runtime_seconds": {"type": "integer"},
+                        "skills":              {"type": "array", "items": {"type": "string"}},
+                        "goal_mode":           {"type": "boolean"},
+                        "goal_max_turns":      {"type": "integer"},
+                    },
+                },
+            },
+            "board": _board_schema_prop(),
+        },
+        "required": ["tasks"],
+    },
+}
+
+KANBAN_PLAN_APPROVE_SCHEMA = {
+    "name": "kanban_plan_approve",
+    "description": (
+        "Execute a staged decomposition plan. Creates all tasks in the plan "
+        "in dependency order, resolving intra-plan depends_on indices to real "
+        "task IDs. The plan is consumed and cannot be approved twice. "
+        "Returns the list of created task IDs."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "plan_id": {
+                "type": "string",
+                "description": "The plan_id returned by kanban_plan_preview.",
+            },
+            "board": _board_schema_prop(),
+        },
+        "required": ["plan_id"],
+    },
+}
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -1496,4 +1770,22 @@ registry.register(
     handler=_handle_link,
     check_fn=_check_kanban_mode,
     emoji="🔗",
+)
+
+registry.register(
+    name="kanban_plan_preview",
+    toolset="kanban",
+    schema=KANBAN_PLAN_PREVIEW_SCHEMA,
+    handler=_handle_plan_preview,
+    check_fn=_check_kanban_orchestrator_mode,
+    emoji="📝",
+)
+
+registry.register(
+    name="kanban_plan_approve",
+    toolset="kanban",
+    schema=KANBAN_PLAN_APPROVE_SCHEMA,
+    handler=_handle_plan_approve,
+    check_fn=_check_kanban_orchestrator_mode,
+    emoji="✅",
 )
