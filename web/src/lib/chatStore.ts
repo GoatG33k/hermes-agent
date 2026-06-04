@@ -171,9 +171,10 @@ export function localStoragePersistence(
               ? parsed.activeSessionId
               : null,
           widgetOpen,
-          // Normalize the invariant on read too: a closed widget can never be
-          // "minimized". This repairs corrupt or older persisted values that
-          // predate `closeWidget()` enforcing it.
+          // Normalize the invariant for the value we return: a closed widget
+          // can never be "minimized". This repair is in-memory only — we do
+          // not write the corrected value back to storage here; it gets
+          // re-persisted on the next state change that calls persist().
           minimized: widgetOpen && parsed.minimized === true,
         };
       } catch {
@@ -298,19 +299,26 @@ export class ChatStore {
 
     const refreshed = await this.refreshSessions();
 
-    // Only reconcile the persisted active id against the server list if we
-    // actually fetched it. If the refresh failed, the empty `sessions` is not
-    // authoritative — pruning here would wrongly drop (and persist the loss of)
-    // a valid active session just because the network was down.
-    if (refreshed) {
-      const ids = new Set(this.state.sessions.map((s) => s.id));
-      if (this.state.activeSessionId && !ids.has(this.state.activeSessionId)) {
-        // Dangling active id that no longer exists server-side — prune it.
-        this.setState({ activeSessionId: null, messages: [] });
-        this.persist();
-      } else if (this.state.activeSessionId) {
-        // Re-load the active session's messages after a refresh.
+    // Reconcile the persisted active id, but only if we actually fetched the
+    // list (a failed refresh's empty `sessions` is not authoritative).
+    if (refreshed && this.state.activeSessionId) {
+      const known = this.state.sessions.some(
+        (s) => s.id === this.state.activeSessionId,
+      );
+      if (known) {
+        // Present in the fetched page — just load its transcript.
         await this.loadActiveMessages();
+      } else {
+        // Absent from the page. Do NOT prune on absence alone: the listing is
+        // capped (DEFAULT_SESSIONS_PAGE_SIZE) so an older-but-valid active
+        // session can legitimately fall beyond the first page. Probe it
+        // directly via a message load; prune only on positive evidence it's
+        // gone (the load failed).
+        const ok = await this.loadActiveMessages();
+        if (!ok) {
+          this.setState({ activeSessionId: null, messages: [], error: null });
+          this.persist();
+        }
       }
     }
 
@@ -429,12 +437,14 @@ export class ChatStore {
     if (id) await this.loadActiveMessages();
   }
 
-  /** (Re)load messages for the active session from the server. */
-  async loadActiveMessages(): Promise<void> {
+  /** (Re)load messages for the active session from the server. Returns true if
+   *  the transcript loaded and committed, false on error or if there is no
+   *  active session / the load was superseded. */
+  async loadActiveMessages(): Promise<boolean> {
     const id = this.state.activeSessionId;
     if (!id) {
       this.setState({ messages: [] });
-      return;
+      return false;
     }
     const token = ++this.loadToken;
     this.setState({ loading: true, error: null });
@@ -443,11 +453,13 @@ export class ChatStore {
       // Only the most recent load may mutate state. A superseded request
       // (the user switched sessions, or fired another reload) must not flip
       // `loading` off or overwrite the newer transcript.
-      if (token !== this.loadToken) return;
+      if (token !== this.loadToken) return false;
       this.setState({ messages, loading: false });
+      return true;
     } catch (e) {
-      if (token !== this.loadToken) return;
+      if (token !== this.loadToken) return false;
       this.setState({ loading: false, error: errMsg(e) });
+      return false;
     }
   }
 
@@ -529,9 +541,18 @@ export class ChatStore {
     );
   }
 
-  /** Wipe persisted UI state (does not touch server sessions). */
-  resetPersisted(): void {
+  /** Clear persisted UI state AND reset the in-memory widget flags + active
+   *  selection to match, so storage and the live snapshot stay consistent.
+   *  Does not touch server sessions (use `deleteSession` for that). */
+  clearPersistedState(): void {
     this.persistence.clear();
+    this.loadToken++; // invalidate any in-flight load tied to the old selection
+    this.setState({
+      activeSessionId: null,
+      messages: [],
+      widgetOpen: false,
+      minimized: false,
+    });
   }
 }
 

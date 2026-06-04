@@ -48,6 +48,10 @@ function makeFakeBackend(initial: ChatSession[] = []) {
       messages.delete(id);
     },
     async loadMessages(id) {
+      // Model a gone/deleted session as a failed transcript fetch (the real
+      // REST endpoint 404s), so the store can distinguish "absent from the
+      // listing page but still valid" from "actually gone".
+      if (!sessions.has(id)) throw new Error("session not found");
       return [...(messages.get(id) ?? [])];
     },
   };
@@ -424,6 +428,37 @@ describe("ChatStore — persistence across refresh", () => {
     expect(state.widgetOpen).toBe(true);
   });
 
+  it("keeps a persisted active session that's valid but beyond the listing page", async () => {
+    // The session isn't in the (capped) listing, but its transcript loads fine
+    // — it's just older than page 1. It must NOT be pruned.
+    const persistence = makeMemoryPersistence();
+    persistence.write({
+      activeSessionId: "old-session",
+      widgetOpen: true,
+      minimized: false,
+    });
+    const deps: ChatStoreDeps = {
+      async createSession() {
+        return { id: "x" };
+      },
+      async listSessions() {
+        return [session("recent-1"), session("recent-2")]; // page 1, no old-session
+      },
+      async deleteSession() {},
+      async loadMessages(id) {
+        if (id === "old-session") return [{ role: "user", content: "hi" }];
+        throw new Error("not found");
+      },
+    };
+    const store = new ChatStore(deps, persistence);
+    await store.hydrate();
+
+    const state = store.getSnapshot();
+    expect(state.activeSessionId).toBe("old-session");
+    expect(state.messages).toEqual([{ role: "user", content: "hi" }]);
+    expect(persistence.snapshot()?.activeSessionId).toBe("old-session");
+  });
+
   it("does not duplicate message content into the persisted slot", async () => {
     const backend = makeFakeBackend();
     const persistence = makeMemoryPersistence();
@@ -513,6 +548,21 @@ describe("ChatStore — widget state", () => {
     store.setMinimized(true);
     store.openWidget();
     expect(store.getSnapshot().minimized).toBe(false);
+  });
+
+  it("clearPersistedState wipes storage and resets in-memory UI state", async () => {
+    await store.createSession();
+    store.openWidget();
+    store.setMinimized(true);
+
+    store.clearPersistedState();
+
+    const state = store.getSnapshot();
+    expect(state.activeSessionId).toBeNull();
+    expect(state.messages).toEqual([]);
+    expect(state.widgetOpen).toBe(false);
+    expect(state.minimized).toBe(false);
+    expect(persistence.snapshot()).toBeNull();
   });
 
   it("minimize controls are no-ops while the widget is closed", () => {
