@@ -31,6 +31,7 @@ import {
   ChevronDown,
   Check,
   Loader2,
+  Sparkles,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import type { ProfileInfo } from "@/lib/api";
@@ -79,7 +80,6 @@ function WidgetProfilePicker({
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
     api
       .getProfiles()
       .then((res) => { if (!cancelled && res.profiles) setProfiles(res.profiles); })
@@ -106,7 +106,7 @@ function WidgetProfilePicker({
         <Fragment>
           <div className="fixed inset-0 z-50" onClick={() => setOpen(false)} />
           <div
-            className="absolute right-0 top-full z-[200] mt-1 w-48 rounded-lg border border-border p-1 shadow-xl"
+            className="absolute right-0 top-full z-200 mt-1 w-48 rounded-lg border border-border p-1 shadow-xl"
             style={{ background: "var(--background-base)" }}
           >
             <div className="px-2 pb-1 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-tertiary">
@@ -196,7 +196,22 @@ const ChatBubble = memo(function ChatBubble({ message }: { message: ChatMessage 
       <span className="text-[10px] text-text-tertiary px-1">
         {roleLabel(message.role)}
         {message.timestamp ? ` · ${formatTime(message.timestamp)}` : ""}
+        {!isUser && (message.inputTokens != null || message.outputTokens != null) && (
+          <span className="ml-1 opacity-60">
+            {message.inputTokens != null ? `↑${message.inputTokens}` : ""}
+            {message.inputTokens != null && message.outputTokens != null ? " " : ""}
+            {message.outputTokens != null ? `↓${message.outputTokens}` : ""}
+          </span>
+        )}
       </span>
+      {/* ── Thinking content (when collapsed with content) ── */}
+      {!isUser && message.thinking && (
+        <div className="rounded-lg rounded-bl-sm px-2 py-1 max-w-[85%] bg-surface/40 border border-border/20 mb-1">
+          <p className="text-[10px] leading-relaxed text-text-tertiary italic line-clamp-2 whitespace-pre-wrap">
+            {message.thinking}
+          </p>
+        </div>
+      )}
       <div
         className={cn(
           "w-full rounded-lg px-2.5 py-1.5",
@@ -209,7 +224,7 @@ const ChatBubble = memo(function ChatBubble({ message }: { message: ChatMessage 
           isUser ? (
             <span className="whitespace-pre-wrap">{message.content}</span>
           ) : (
-            <div className="[&>div]:text-xs [&>div]:leading-relaxed [&_pre]:overflow-x-auto [&_pre]:rounded [&_pre]:p-2 [&_pre]:text-[11px]">
+            <div className="[&>div]:text-xs [&>div]:leading-relaxed [&_pre]:overflow-x-auto [&_pre]:rounded [&_pre]:px-2.5 [&_pre]:py-1.5 [&_pre]:text-[11px]">
               <Markdown content={message.content} />
             </div>
           )
@@ -288,6 +303,15 @@ export function ChatWidget() {
   const scrollRafRef = useRef<number | null>(null);
   const resizeStartRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
 
+  // Sync store composer to local state on hydration or mount
+  const hasHydratedComposer = useRef(false);
+  useEffect(() => {
+    if (hydrated && state.composer && !hasHydratedComposer.current) {
+      setComposer(state.composer);
+      hasHydratedComposer.current = true;
+    }
+  }, [hydrated, state.composer]);
+
   useEffect(() => {
     if (scrollRafRef.current !== null) {
       cancelAnimationFrame(scrollRafRef.current);
@@ -314,6 +338,7 @@ export function ChatWidget() {
 
   const handleResizeStart = useCallback(
     (e: React.MouseEvent | React.TouchEvent) => {
+      e.preventDefault();
       const clientX = "touches" in e ? e.touches[0].clientX : e.clientX;
       const clientY = "touches" in e ? e.touches[0].clientY : e.clientY;
       resizeStartRef.current = {
@@ -322,56 +347,43 @@ export function ChatWidget() {
         w: widgetWidth,
         h: widgetHeight,
       };
+
+      const handleMove = (ev: MouseEvent | TouchEvent) => {
+        if (!resizeStartRef.current) return;
+        const cx = "touches" in ev ? ev.touches[0].clientX : ev.clientX;
+        const cy = "touches" in ev ? ev.touches[0].clientY : ev.clientY;
+        const deltaX = resizeStartRef.current.x - cx;
+        const deltaY = resizeStartRef.current.y - cy;
+        store.setWidgetSize(
+          resizeStartRef.current.w + deltaX,
+          resizeStartRef.current.h + deltaY,
+        );
+      };
+
+      const handleEnd = () => {
+        resizeStartRef.current = null;
+        document.removeEventListener("mousemove", handleMove);
+        document.removeEventListener("touchmove", handleMove as EventListener);
+        document.removeEventListener("mouseup", handleEnd);
+        document.removeEventListener("touchend", handleEnd);
+      };
+
+      document.addEventListener("mousemove", handleMove);
+      document.addEventListener("touchmove", handleMove as EventListener);
+      document.addEventListener("mouseup", handleEnd);
+      document.addEventListener("touchend", handleEnd);
     },
-    [widgetWidth, widgetHeight],
+    [widgetWidth, widgetHeight, store],
   );
 
-  useEffect(() => {
-    if (!resizeStartRef.current) return;
-
-    const handleMove = (e: MouseEvent | TouchEvent) => {
-      if (!resizeStartRef.current) return;
-      const clientX = "touches" in e ? e.touches[0].clientX : e.clientX;
-      const clientY = "touches" in e ? e.touches[0].clientY : e.clientY;
-
-      // Resize increases width when dragging right, increases height when dragging down
-      // Resize increases width when dragging right (deltaX), increases height when dragging UP (-deltaY)
-      const deltaX = resizeStartRef.current.x - clientX;
-      const deltaY = resizeStartRef.current.y - clientY;
-
-      const newWidth = resizeStartRef.current.w + deltaX;
-      const newHeight = resizeStartRef.current.h + deltaY;
-
-      store.setWidgetSize(newWidth, newHeight);
-    };
-
-    const handleEnd = () => {
-      resizeStartRef.current = null;
-      document.removeEventListener("mousemove", handleMove);
-      document.removeEventListener("touchmove", handleMove);
-      document.removeEventListener("mouseup", handleEnd);
-      document.removeEventListener("touchend", handleEnd);
-    };
-
-    document.addEventListener("mousemove", handleMove);
-    document.addEventListener("touchmove", handleMove);
-    document.addEventListener("mouseup", handleEnd);
-    document.addEventListener("touchend", handleEnd);
-
-    return () => {
-      document.removeEventListener("mousemove", handleMove);
-      document.removeEventListener("touchmove", handleMove);
-      document.removeEventListener("mouseup", handleEnd);
-      document.removeEventListener("touchend", handleEnd);
-    };
-  }, [store]);
-
   const handleComposerChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setComposer(e.target.value);
+    const text = e.target.value;
+    setComposer(text);
+    store.setComposer(text);
     const el = e.target;
     el.style.height = "auto";
     el.style.height = Math.min(el.scrollHeight, 120) + "px";
-  }, []);
+  }, [store]);
 
   const handleSend = useCallback(async () => {
     const text = composer.trim();
@@ -390,6 +402,7 @@ export function ChatWidget() {
     };
     store.appendMessage(userMsg);
     setComposer("");
+    store.setComposer("");
     if (composerRef.current) {
       composerRef.current.style.height = "auto";
     }
@@ -412,7 +425,7 @@ export function ChatWidget() {
   // ── Minimized FAB ────────────────────────────────────────────────
   if (!widgetOpen || minimized) {
     return (
-      <div className="fixed bottom-6 right-6 z-50">
+      <div className="fixed bottom-6 right-6 z-110">
         <Button
           onClick={() => store.openWidget()}
           className="flex h-12 w-12 items-center justify-center rounded-full shadow-lg bg-accent text-white hover:bg-accent/90 transition-all"
@@ -429,7 +442,7 @@ export function ChatWidget() {
   return (
     <div
       className={cn(
-        "fixed bottom-4 right-4 z-50 flex flex-col",
+        "fixed bottom-4 right-4 z-110 flex flex-col",
         "rounded-xl border border-border shadow-2xl",
         "max-w-[calc(100vw-2rem)] max-h-[calc(100vh-2rem)]",
         "overflow-hidden",
@@ -440,35 +453,46 @@ export function ChatWidget() {
         height: `${widgetHeight}px`,
       }}
     >
-      {/* ── Header ──────────────────────────────────────────────── */}
-      <div className="flex shrink-0 items-center gap-1 px-3 py-2 border-b border-current/20 relative">
-        <button
-          onMouseDown={handleResizeStart}
-          onTouchStart={handleResizeStart}
-          className="mr-1 rounded p-1 text-text-secondary hover:text-text-primary hover:bg-midground/10 transition-colors cursor-nwse-resize"
-          aria-label="Resize"
-          title="Drag to resize"
-        >
-          <ChevronDown className="h-3.5 w-3.5 rotate-[135deg]" />
-        </button>
-        <MessageSquare className="h-4 w-4 shrink-0 text-midground" />
-        <span className="flex-1 text-xs font-semibold uppercase tracking-wider text-midground">
-          Chat
+      {/* ── Resize Handle (Top-Left) ── */}
+      <div
+        onMouseDown={handleResizeStart}
+        onTouchStart={handleResizeStart}
+        className="absolute left-0 top-0 z-60 h-6 w-6 cursor-nwse-resize active:cursor-nwse-resize group"
+      >
+        <div className="absolute left-1 top-1 h-3 w-3 rounded-br-sm border-l-2 border-t-2 border-accent/20 transition-colors group-hover:border-accent/60" />
+      </div>
+
+      {/* ── Header ── */}
+      <div className="flex shrink-0 items-center gap-2 pl-8 pr-3 py-2 border-b border-border relative">
+        <Sparkles className="h-4 w-4 text-primary" />
+        <span className="flex-1 text-xs font-semibold uppercase tracking-wider text-text-secondary flex items-baseline gap-1.5 min-w-0">
+          Hermes
+          {(() => {
+            const last = [...visibleMessages].reverse().find(m => m.role === "assistant" && m.contextUsed != null);
+            if (!last?.contextUsed) return null;
+            const used = last.contextUsed;
+            const max = last.contextMax;
+            const label = used >= 1000 ? `${(used / 1000).toFixed(1)}k` : String(used);
+            const maxLabel = max ? (max >= 1000 ? `${Math.round(max / 1000)}k` : String(max)) : null;
+            return (
+              <span className="text-[9px] font-normal text-text-tertiary tracking-normal normal-case opacity-70">
+                {maxLabel ? `${label} / ${maxLabel}` : label} ctx
+              </span>
+            );
+          })()}
         </span>
         <WidgetProfilePicker value={profile} onChange={setProfile} />
         <div className="flex items-center gap-0.5">
           <button
             onClick={() => store.setMinimized(true)}
-            className="rounded p-1 text-text-secondary hover:text-text-primary hover:bg-midground/10 transition-colors"
-            aria-label="Minimise"
-            title="Minimise"
+            className="rounded p-1 text-text-secondary hover:text-text-primary hover:bg-surface-hover transition-colors"
+            title="Minimize"
           >
             <Minus className="h-3.5 w-3.5" />
           </button>
           <button
-            onClick={() => store.setMinimized(true)}
-            className="rounded p-1 text-text-secondary hover:text-text-primary hover:bg-midground/10 transition-colors"
-            aria-label="Close"
+            onClick={() => store.closeWidget()}
+            className="rounded p-1 text-text-secondary hover:text-text-primary hover:bg-surface-hover transition-colors"
             title="Close"
           >
             <X className="h-3.5 w-3.5" />
@@ -539,6 +563,12 @@ export function ChatWidget() {
               {visibleMessages.map((msg, i) => (
                 <ChatBubble key={i} message={msg} />
               ))}
+              {loading && visibleMessages.length > 0 && (
+                <div className="flex items-center gap-1.5 px-3 py-1">
+                  <Loader2 className="h-3 w-3 animate-spin text-accent" />
+                  <span className="text-[10px] text-text-tertiary">Agent is working…</span>
+                </div>
+              )}
               <div ref={messagesEndRef} />
             </div>
 
