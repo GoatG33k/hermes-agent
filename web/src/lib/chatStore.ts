@@ -319,40 +319,48 @@ export class ChatStore {
           this.setState({ activeSessionId: null, messages: [], error: null });
           this.persist();
         } else {
-          // Valid but beyond the listing page. Synthesize a minimal entry so
-          // the active session is present in `sessions` — keeping the
-          // activeSessionId pointer and the list consistent (and surviving
-          // later refreshes via refreshSessions' retain-active logic).
-          const id = this.state.activeSessionId;
-          if (id && !this.state.sessions.some((s) => s.id === id)) {
-            // Order it by its real recency, not "now" — using now would make an
-            // old session sort to the top. Fall back to 0 (oldest) when the
-            // transcript carries no timestamps, so it lands at the bottom.
-            const lastTs = this.state.messages.reduce(
-              (max, m) => (m.timestamp && m.timestamp > max ? m.timestamp : max),
-              0,
-            );
-            this.setState({
-              sessions: sortSessions([
-                ...this.state.sessions,
-                {
-                  id,
-                  title: null,
-                  profile: null,
-                  model: null,
-                  createdAt: lastTs,
-                  lastActive: lastTs,
-                  preview: null,
-                  messageCount: this.state.messages.length,
-                },
-              ]),
-            });
-          }
+          // Valid but beyond the listing page — make sure it's in the list so
+          // the activeSessionId pointer and `sessions` stay consistent.
+          this.ensureActiveInList();
         }
       }
     }
 
     this.setState({ hydrated: true });
+  }
+
+  /**
+   * Guarantee the active session has an entry in `sessions`. If it's missing
+   * (e.g. it lives beyond the capped listing page, or was selected by id via a
+   * deep link), synthesize a minimal placeholder ordered by the active
+   * transcript's latest timestamp (so it doesn't jump to the top). No-op when
+   * there is no active session or it's already present.
+   */
+  private ensureActiveInList(): void {
+    const id = this.state.activeSessionId;
+    if (!id || this.state.sessions.some((s) => s.id === id)) return;
+    const lastTs = this.state.messages.reduce(
+      (max, m) =>
+        typeof m.timestamp === "number" && m.timestamp > max
+          ? m.timestamp
+          : max,
+      0,
+    );
+    this.setState({
+      sessions: sortSessions([
+        ...this.state.sessions,
+        {
+          id,
+          title: null,
+          profile: null,
+          model: null,
+          createdAt: lastTs,
+          lastActive: lastTs,
+          preview: null,
+          messageCount: this.state.messages.length,
+        },
+      ]),
+    });
   }
 
   // ---- session registry ---------------------------------------------------
@@ -475,7 +483,13 @@ export class ChatStore {
     this.loadToken++;
     this.setState({ activeSessionId: id, messages: [], loading: false });
     this.persist();
-    if (id) await this.loadActiveMessages();
+    if (id) {
+      const ok = await this.loadActiveMessages();
+      // If the selected id wasn't in the list (e.g. a deep-link / resume id),
+      // make it consistent so getActiveSession()/appendMessage() work against
+      // it. Only do this when the session is actually valid (load succeeded).
+      if (ok) this.ensureActiveInList();
+    }
   }
 
   /** (Re)load messages for the active session from the server. Returns true if

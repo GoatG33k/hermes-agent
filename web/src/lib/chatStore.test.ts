@@ -342,6 +342,31 @@ describe("ChatStore — messages per session", () => {
     expect(store.getSnapshot().messages).toEqual([]);
   });
 
+  it("selecting a valid id not in the list adds it for consistency", async () => {
+    const deps: ChatStoreDeps = {
+      async createSession() {
+        return { id: "x" };
+      },
+      async listSessions() {
+        return []; // nothing in the listing
+      },
+      async deleteSession() {},
+      async loadMessages(id) {
+        if (id === "deep-link") return [{ role: "user", content: "hi" }];
+        throw new Error("not found");
+      },
+    };
+    const store = new ChatStore(deps, makeMemoryPersistence());
+    await store.refreshSessions();
+
+    await store.selectSession("deep-link");
+
+    expect(store.getActiveSession()?.id).toBe("deep-link");
+    expect(
+      store.getSnapshot().sessions.some((s) => s.id === "deep-link"),
+    ).toBe(true);
+  });
+
   it("clearing the active session does not leave loading stuck on", async () => {
     let resolveLoad!: (m: ChatMessage[]) => void;
     const deps: ChatStoreDeps = {
