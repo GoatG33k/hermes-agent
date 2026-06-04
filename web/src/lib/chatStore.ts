@@ -87,6 +87,11 @@ export interface ChatMessage {
   /** Thinking/reasoning text streamed before the final response. Cleared when
    *  the real response starts arriving so the bubble transitions cleanly. */
   thinking?: string | null;
+  /** Token usage attached by the gateway on message.complete. */
+  inputTokens?: number;
+  outputTokens?: number;
+  contextUsed?: number;
+  contextMax?: number;
 }
 
 /** Immutable view of the whole store. */
@@ -113,6 +118,8 @@ export interface ChatStoreState {
   hydrated: boolean;
   /** Available chat profiles loaded from the server. */
   profiles: ChatProfile[];
+  /** Persisted composer text. */
+  composer: string;
 }
 
 /** Server-access surface the store depends on. Injected so the store has no
@@ -143,7 +150,7 @@ export interface ChatStoreDeps {
       onTurnStart(): void;
       onThinkingDelta(text: string): void;
       onDelta(text: string): void;
-      onTurnComplete(): void;
+      onTurnComplete(usage?: { input?: number; output?: number; context_used?: number; context_max?: number }): void;
       onDone(): void;
       onError(msg: string): void;
     },
@@ -174,6 +181,8 @@ export interface PersistedChatState {
   minimized: boolean;
   widgetWidth?: number;
   widgetHeight?: number;
+  loading?: boolean;
+  composer?: string;
 }
 
 const STORAGE_KEY = "hermes.chat.v1";
@@ -190,6 +199,7 @@ const INITIAL_STATE: ChatStoreState = Object.freeze({
   widgetHeight: 500,
   hydrated: false,
   profiles: [],
+  composer: "",
 });
 
 /** Build a `ChatStorePersistence` backed by the given `Storage` (or null when
@@ -315,6 +325,8 @@ export class ChatStore {
       minimized: this.state.minimized,
       widgetWidth: this.state.widgetWidth,
       widgetHeight: this.state.widgetHeight,
+      loading: this.state.loading,
+      composer: this.state.composer,
     });
   }
 
@@ -595,7 +607,6 @@ export class ChatStore {
   async sendMessage(sessionId: string, content: string): Promise<void> {
     this.setState({ loading: true, error: null });
     let turnCount = 0;
-    let responseStarted = false;
     // Batch streaming updates: accumulate thinking + response chunks and flush
     // at most every ~33ms. This avoids saturating React with one state commit
     // per token when providers emit high-frequency streaming chunks.
@@ -615,16 +626,15 @@ export class ChatStore {
       const msgs = [...this.state.messages];
       const last = msgs[msgs.length - 1];
       if (last?.role === "assistant") {
-        const nextThinking =
-          !responseStarted && pendingThinking
-            ? (last.thinking ?? "") + pendingThinking
-            : last.thinking;
+        const nextThinking = pendingThinking
+          ? (last.thinking ?? "") + pendingThinking
+          : last.thinking;
         const nextContent = pendingDelta
           ? (last.content ?? "") + pendingDelta
           : last.content;
         msgs[msgs.length - 1] = {
           ...last,
-          thinking: responseStarted ? null : nextThinking,
+          thinking: nextThinking,
           content: nextContent,
         };
         this.setState({ messages: msgs });
@@ -636,7 +646,6 @@ export class ChatStore {
     await this.deps.sendMessage(sessionId, content, {
       onTurnStart: () => {
         turnCount++;
-        responseStarted = false;
         pendingThinking = "";
         pendingDelta = "";
         if (flushTimer !== null) {
@@ -663,14 +672,12 @@ export class ChatStore {
         }
       },
       onThinkingDelta: (text: string) => {
-        if (responseStarted || !text) return;
+        if (!text) return;
         pendingThinking += text;
         scheduleFlush();
       },
       onDelta: (text: string) => {
         if (!text) return;
-        responseStarted = true;
-        pendingThinking = "";
         pendingDelta += text;
         // First response token should feel immediate; later chunks are batched.
         if (pendingDelta.length === text.length) {
@@ -679,9 +686,22 @@ export class ChatStore {
           scheduleFlush();
         }
       },
-      onTurnComplete: () => {
-        // Flush any remaining buffered chunks before the turn ends.
+      onTurnComplete: (usage?: { input?: number; output?: number; context_used?: number; context_max?: number }) => {
         flushStreamBuffers();
+        if (usage && (usage.input != null || usage.output != null || usage.context_used != null)) {
+          const msgs = [...this.state.messages];
+          const last = msgs[msgs.length - 1];
+          if (last?.role === "assistant") {
+            msgs[msgs.length - 1] = {
+              ...last,
+              inputTokens: usage.input,
+              outputTokens: usage.output,
+              contextUsed: usage.context_used,
+              contextMax: usage.context_max,
+            };
+            this.setState({ messages: msgs });
+          }
+        }
       },
       onDone: () => {
         flushStreamBuffers();
@@ -723,6 +743,11 @@ export class ChatStore {
   /** Open the pinned chat widget. */
   openWidget(): void {
     this.setState({ widgetOpen: true, minimized: false });
+    this.persist();
+  }
+
+  setComposer(text: string): void {
+    this.setState({ composer: text });
     this.persist();
   }
 

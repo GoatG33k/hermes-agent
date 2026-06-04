@@ -1,4 +1,40 @@
 import { memo, useMemo, type ReactNode } from "react";
+import hljs from "highlight.js/lib/core";
+import langBash from "highlight.js/lib/languages/bash";
+import langPython from "highlight.js/lib/languages/python";
+import langJs from "highlight.js/lib/languages/javascript";
+import langTs from "highlight.js/lib/languages/typescript";
+import langJson from "highlight.js/lib/languages/json";
+import langSql from "highlight.js/lib/languages/sql";
+import langYaml from "highlight.js/lib/languages/yaml";
+import langXml from "highlight.js/lib/languages/xml";
+import langCss from "highlight.js/lib/languages/css";
+
+hljs.registerLanguage("bash", langBash);
+hljs.registerLanguage("sh", langBash);
+hljs.registerLanguage("shell", langBash);
+hljs.registerLanguage("python", langPython);
+hljs.registerLanguage("py", langPython);
+hljs.registerLanguage("javascript", langJs);
+hljs.registerLanguage("js", langJs);
+hljs.registerLanguage("typescript", langTs);
+hljs.registerLanguage("ts", langTs);
+hljs.registerLanguage("tsx", langTs);
+hljs.registerLanguage("jsx", langJs);
+hljs.registerLanguage("json", langJson);
+hljs.registerLanguage("sql", langSql);
+hljs.registerLanguage("yaml", langYaml);
+hljs.registerLanguage("yml", langYaml);
+hljs.registerLanguage("xml", langXml);
+hljs.registerLanguage("html", langXml);
+hljs.registerLanguage("css", langCss);
+
+function highlightCode(lang: string, content: string): string {
+  if (lang && hljs.getLanguage(lang)) {
+    return hljs.highlight(content, { language: lang }).value;
+  }
+  return content.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
 
 /**
  * Lightweight markdown renderer for LLM output.
@@ -185,15 +221,18 @@ function Block({
   caret?: ReactNode;
 }) {
   switch (block.type) {
-    case "code":
+    case "code": {
+      const highlighted = highlightCode(block.lang, block.content);
       return (
-        <pre className="bg-secondary/60 border border-border px-3 py-2.5 text-xs font-mono leading-relaxed overflow-x-auto">
-          <code>
-            {block.content}
-            {caret}
-          </code>
+        <pre className="bg-muted border border-border px-3 py-2.5 text-xs font-mono leading-relaxed overflow-x-auto">
+          <code
+            className="hljs bg-transparent"
+            dangerouslySetInnerHTML={{ __html: highlighted }}
+          />
+          {caret}
         </pre>
       );
+    }
 
     case "heading": {
       const Tag = `h${Math.min(block.level, 4)}` as "h1" | "h2" | "h3" | "h4";
@@ -358,7 +397,7 @@ function InlineContent({
             return (
               <code
                 key={i}
-                className="bg-secondary/60 px-1.5 py-0.5 text-xs font-mono text-primary/90"
+                className="bg-muted px-1.5 py-0.5 text-xs font-mono text-primary/90"
               >
                 {node.content}
               </code>

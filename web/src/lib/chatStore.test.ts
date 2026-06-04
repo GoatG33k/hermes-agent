@@ -469,6 +469,8 @@ describe("ChatStore — persistence across refresh", () => {
       minimized: true,
       widgetWidth: 380,
       widgetHeight: 500,
+      loading: false,
+      composer: "",
     });
 
     // --- "page refresh": brand-new store over the same persistence + backend
@@ -573,6 +575,8 @@ describe("ChatStore — persistence across refresh", () => {
       "minimized",
       "widgetWidth",
       "widgetHeight",
+      "loading",
+      "composer",
     ]);
   });
 
@@ -633,6 +637,8 @@ describe("ChatStore — widget state", () => {
       minimized: false,
       widgetWidth: 380,
       widgetHeight: 500,
+      loading: false,
+      composer: "",
     });
   });
 

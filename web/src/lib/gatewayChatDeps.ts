@@ -222,9 +222,9 @@ export function createGatewayChatDeps(
           handlers.onDelta(ev.payload.text);
         });
 
-        const offTurnComplete = client.on("message.complete", (ev) => {
+        const offTurnComplete = client.on<{ usage?: { input?: number; output?: number; context_used?: number; context_max?: number } }>("message.complete", (ev) => {
           if (ev.session_id !== gatewaySid) return;
-          handlers.onTurnComplete();
+          handlers.onTurnComplete(ev.payload?.usage);
           // Do NOT resolve here — the agent may start another turn for tool calls.
         });
 
