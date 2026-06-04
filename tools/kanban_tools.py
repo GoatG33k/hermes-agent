@@ -1489,6 +1489,7 @@ def _plan_summary(plan_id: str, tasks: list[dict]) -> str:
     return "\n".join(lines)
 
 
+
 def _handle_plan_preview(args: dict, **kw) -> str:
     guard = _require_orchestrator_tool("kanban_plan_preview")
     if guard:
