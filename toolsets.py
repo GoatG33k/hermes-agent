@@ -273,6 +273,7 @@ TOOLSETS = {
             "kanban_heartbeat", "kanban_comment",
             "kanban_create", "kanban_link",
             "kanban_unblock",
+            "kanban_plan_preview", "kanban_plan_approve",
         ],
         "includes": [],
     },
