@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ChatStore } from "@/lib/chatStore";
 import type { ChatStoreDeps, ChatStorePersistence } from "@/lib/chatStore";
 import { createGatewayChatDeps } from "@/lib/gatewayChatDeps";
@@ -37,13 +37,12 @@ export function ChatStoreProvider({
   initialPersistence,
   autoHydrate = true,
 }: ChatStoreProviderProps) {
-  // One store for the app's lifetime. `useMemo` with an empty dep array keeps
-  // the same instance across re-renders; the initial deps/persistence are
-  // captured once here by design (see the prop docs above).
-  const store = useMemo(
+  // One store for the app's lifetime. A `useState` lazy initializer is the
+  // idiomatic React way to construct a stable value exactly once: the factory
+  // runs on the first render only, capturing the initial deps/persistence (see
+  // the prop docs above), and the setter is never called so the value is fixed.
+  const [store] = useState(
     () => new ChatStore(initialDeps ?? createGatewayChatDeps(), initialPersistence),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
   );
 
   const hydratedRef = useRef(false);

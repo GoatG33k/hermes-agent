@@ -394,6 +394,18 @@ describe("ChatStore — widget state", () => {
     expect(persistence.snapshot()?.widgetOpen).toBe(false);
   });
 
+  it("closing resets minimized so the inconsistent combo is never persisted", () => {
+    store.openWidget();
+    store.setMinimized(true);
+    store.closeWidget();
+    expect(store.getSnapshot().minimized).toBe(false);
+    expect(persistence.snapshot()).toEqual({
+      activeSessionId: null,
+      widgetOpen: false,
+      minimized: false,
+    });
+  });
+
   it("toggleMinimized flips and persists the flag", () => {
     expect(store.getSnapshot().minimized).toBe(false);
     store.toggleMinimized();

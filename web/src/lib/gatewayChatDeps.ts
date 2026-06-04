@@ -53,11 +53,21 @@ function toChatMessage(m: SessionMessage): ChatMessage {
  * Build the production deps bag. A single lazily-connected `GatewayClient` is
  * shared for the app's lifetime; callers never see it.
  */
-export function createGatewayChatDeps(): ChatStoreDeps {
+export function createGatewayChatDeps(
+  // Injectable for tests: lets a fake client stand in for the real WebSocket
+  // gateway. Production passes nothing and gets a real `GatewayClient`.
+  makeClient: () => GatewayClient = () => new GatewayClient(),
+): ChatStoreDeps {
   let gw: GatewayClient | null = null;
+  // Single-flight connect: while a connection is being established, concurrent
+  // callers await the SAME promise instead of each spinning up (and tearing
+  // down) their own client. Cleared once the connect settles.
+  let connecting: Promise<GatewayClient> | null = null;
 
   async function gateway(): Promise<GatewayClient> {
     if (gw && gw.state === "open") return gw;
+    if (connecting) return connecting;
+
     // Dispose any prior (closed/errored) client before replacing it so we
     // don't leak its socket + event listeners across reconnects.
     if (gw) {
@@ -66,10 +76,20 @@ export function createGatewayChatDeps(): ChatStoreDeps {
       } catch {
         /* already closed */
       }
+      gw = null;
     }
-    gw = new GatewayClient();
-    await gw.connect();
-    return gw;
+
+    const client = makeClient();
+    connecting = client
+      .connect()
+      .then(() => {
+        gw = client;
+        return client;
+      })
+      .finally(() => {
+        connecting = null;
+      });
+    return connecting;
   }
 
   return {

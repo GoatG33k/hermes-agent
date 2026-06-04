@@ -445,9 +445,11 @@ export class ChatStore {
     this.persist();
   }
 
-  /** Fully close (dismiss) the widget. Does not delete any chat. */
+  /** Fully close (dismiss) the widget. Does not delete any chat. Resets
+   *  `minimized` so we never persist the inconsistent
+   *  `widgetOpen:false + minimized:true` combination. */
   closeWidget(): void {
-    this.setState({ widgetOpen: false });
+    this.setState({ widgetOpen: false, minimized: false });
     this.persist();
   }
 

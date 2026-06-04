@@ -1,5 +1,10 @@
 import { defineConfig } from "vitest/config";
-import path from "path";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+
+// ESM-safe __dirname: this config is loaded as an ES module, where the CommonJS
+// `__dirname` global is not defined.
+const dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Unit tests for the web dashboard. The chat store is framework-agnostic and
 // only needs the Node environment plus an injected in-memory Storage fake, so
@@ -14,7 +19,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "./src"),
+      "@": path.resolve(dirname, "./src"),
     },
   },
 });
