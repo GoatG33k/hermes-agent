@@ -57,6 +57,7 @@ matching profile from the available roster.
 
 You will be given:
   - The original task title and body
+  - The parent task priority (integer; 0 = default)
   - The list of available profiles (each with name + description)
   - The fallback "default_assignee" used when no profile fits
 
@@ -68,9 +69,10 @@ Output a single JSON object with this exact shape:
     "tasks": [
       {
         "title": "<concrete task title, imperative voice, <= 80 chars>",
-        "body":  "<detailed spec for the worker on this child task>",
+        "body":  "<detailed markdown spec for the worker — goal, approach, acceptance criteria>",
         "assignee": "<profile name from the roster, or null for default>",
-        "parents": [<int>, ...]
+        "parents": [<int>, ...],
+        "priority": <int>
       },
       ...
     ]
@@ -88,7 +90,12 @@ Rules:
     DESCRIPTION (not just the name). When nothing matches well, use null
     and the system will route to the default_assignee.
   - Each child task body is what a fresh worker will read with no other
-    context — be specific about goal, approach, and acceptance criteria.
+    context — write it in markdown. Be specific about goal, approach,
+    and acceptance criteria.
+  - "priority" is an integer between 0 and the parent task priority
+    (inclusive). Higher = more important / urgent. Assign higher priority
+    to tasks that block other tasks or are on the critical path. If the
+    parent priority is 0, set all children to 0.
 
 When the task is genuinely a single unit of work (no useful decomposition),
 return:
@@ -97,8 +104,9 @@ return:
     "fanout": false,
     "rationale": "<one sentence>",
     "title": "<tightened title>",
-    "body":  "<concrete spec for a single worker>",
-    "assignee": "<profile name from the roster, or null for default>"
+    "body":  "<concrete markdown spec for a single worker>",
+    "assignee": "<profile name from the roster, or null for default>",
+    "priority": <int>
   }
 
 In that case the task stays as one work item, just with a tightened spec and
@@ -113,6 +121,8 @@ _USER_TEMPLATE = """Task id: {task_id}
 Title: {title}
 Body:
 {body}
+
+Parent task priority: {priority}
 
 Available profiles (assignees you may pick from):
 {roster}
@@ -319,6 +329,7 @@ def decompose_task(
         task_id=task.id,
         title=_truncate(task.title or "", 400),
         body=_truncate(task.body or "(no body)", 4000),
+        priority=int(task.priority or 0),
         roster=_format_roster(roster),
         default_assignee=default_assignee,
     )
@@ -475,3 +486,153 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
             limit=1000,
         )
     return [row.id for row in rows]
+
+
+def preview_decompose(
+    title: str,
+    body: str = "",
+    *,
+    parent_priority: int = 0,
+    additional_instructions: str = "",
+    timeout: Optional[int] = None,
+) -> dict:
+    """Ask the LLM how it would decompose a task, without writing to DB.
+
+    Returns a plain dict — no DB access, no side effects.
+
+    Return shapes::
+
+        # fanout=True
+        {"ok": True, "fanout": True, "rationale": "...", "orchestrator": "...",
+         "tasks": [{"title": ..., "body": ..., "assignee": ..., "parents": [int]}]}
+
+        # fanout=False
+        {"ok": True, "fanout": False, "rationale": "...", "orchestrator": "...",
+         "single_title": ..., "single_body": ..., "single_assignee": ...}
+
+        # error
+        {"ok": False, "error": "..."}
+    """
+    cfg = _load_config()
+    orchestrator = _resolve_orchestrator_profile(cfg)
+    default_assignee = _resolve_default_assignee(cfg)
+    roster, valid_names = _build_roster()
+
+    try:
+        from agent.auxiliary_client import (  # type: ignore
+            get_auxiliary_extra_body,
+            get_text_auxiliary_client,
+        )
+    except Exception:
+        return {"ok": False, "error": "auxiliary client unavailable"}
+
+    try:
+        client, model = get_text_auxiliary_client("kanban_decomposer")
+    except Exception:
+        return {"ok": False, "error": "auxiliary client unavailable"}
+
+    if client is None or not model:
+        return {"ok": False, "error": "no auxiliary client configured"}
+
+    user_msg = _USER_TEMPLATE.format(
+        task_id="(preview)",
+        title=_truncate(title or "", 400),
+        body=_truncate(body or "(no body)", 4000),
+        priority=int(parent_priority or 0),
+        roster=_format_roster(roster),
+        default_assignee=default_assignee,
+    )
+    if additional_instructions and additional_instructions.strip():
+        user_msg += (
+            "\n\nAdditional instructions from user:\n"
+            + additional_instructions.strip()
+        )
+
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0.3,
+            max_tokens=4000,
+            timeout=timeout or 180,
+            extra_body=get_auxiliary_extra_body() or None,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": f"LLM error: {type(exc).__name__}"}
+
+    try:
+        raw = resp.choices[0].message.content or ""
+    except Exception:
+        raw = ""
+
+    parsed = _extract_json_blob(raw)
+    if parsed is None:
+        return {"ok": False, "error": "LLM returned malformed JSON"}
+
+    fanout = bool(parsed.get("fanout"))
+    rationale = str(parsed.get("rationale") or "")
+
+    if not fanout:
+        new_title = parsed.get("title")
+        new_body = parsed.get("body")
+        assignee = _normalize_assignee_choice(
+            parsed.get("assignee"),
+            default_assignee=default_assignee,
+            valid_names=valid_names,
+        )
+        single_priority = max(0, min(int(parent_priority or 0), int(parsed.get("priority") or 0)))
+        return {
+            "ok": True,
+            "fanout": False,
+            "rationale": rationale,
+            "orchestrator": orchestrator,
+            "single_title": new_title.strip() if isinstance(new_title, str) and new_title.strip() else (title or ""),
+            "single_body": new_body if isinstance(new_body, str) else (body or ""),
+            "single_assignee": assignee,
+            "single_priority": single_priority,
+        }
+
+    raw_tasks = parsed.get("tasks") or []
+    if not isinstance(raw_tasks, list) or not raw_tasks:
+        return {"ok": False, "error": "decomposer returned fanout=true with empty tasks list"}
+
+    tasks = []
+    priority_ceiling = int(parent_priority or 0)
+    for idx, entry in enumerate(raw_tasks):
+        if not isinstance(entry, dict):
+            return {"ok": False, "error": f"tasks[{idx}] is not an object"}
+        title_val = entry.get("title")
+        if not isinstance(title_val, str) or not title_val.strip():
+            return {"ok": False, "error": f"tasks[{idx}].title is missing or empty"}
+        body_val = entry.get("body") if isinstance(entry.get("body"), str) else ""
+        assignee = _normalize_assignee_choice(
+            entry.get("assignee"),
+            default_assignee=default_assignee,
+            valid_names=valid_names,
+        )
+        parents = entry.get("parents") or []
+        if not isinstance(parents, list):
+            parents = []
+        clean_parents = [
+            p for p in parents
+            if isinstance(p, int) and 0 <= p < len(raw_tasks) and p != idx
+        ]
+        task_priority = max(0, min(priority_ceiling, int(entry.get("priority") or 0)))
+        tasks.append({
+            "title": title_val.strip()[:200],
+            "body": body_val.strip(),
+            "assignee": assignee,
+            "parents": clean_parents,
+            "priority": task_priority,
+        })
+
+    return {
+        "ok": True,
+        "fanout": True,
+        "rationale": rationale,
+        "orchestrator": orchestrator,
+        "tasks": tasks,
+    }

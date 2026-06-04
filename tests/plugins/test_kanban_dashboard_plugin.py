@@ -1064,30 +1064,25 @@ def test_dashboard_surfaces_ready_blocked_error_inline():
     assert "setPatchErr(null)" in bundle
 
 
-def test_dashboard_dependency_selects_use_value_change_handler():
-    """Regression for the dependency selects in the task drawer: the
-    add-parent / add-child dropdowns must wire through the shared
-    selectChangeHandler helper so their value actually lands on the
-    underlying React state. Salvaged from #20019 @LeonSGP43.
+def test_dashboard_dependency_add_controls_wire_to_add_handlers():
+    """The Related-To section's add-parent / add-child controls must be the
+    TaskSearchSelect autocomplete (matching the create-issue modal) and route
+    their selection straight to onAddParent / onAddChild, so picking a task
+    actually creates the link. #20019 (@LeonSGP43) originally pinned this for
+    the older native <Select>; the autocomplete redesign keeps the contract
+    that a selection lands and triggers the add.
     """
     repo_root = Path(__file__).resolve().parents[2]
     bundle = (
         repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
     ).read_text()
 
-    parent_select = (
-        'value: newParent,\n'
-        '          className: "h-7 text-xs flex-1",\n'
-        '        }, selectChangeHandler(setNewParent))'
-    )
-    child_select = (
-        'value: newChild,\n'
-        '          className: "h-7 text-xs flex-1",\n'
-        '        }, selectChangeHandler(setNewChild))'
-    )
-
-    assert parent_select in bundle
-    assert child_select in bundle
+    # Shared add control: a TaskSearchSelect whose selection invokes onAdd.
+    assert "h(TaskSearchSelect, {" in bundle
+    assert "onChange: function (id) { if (id) onAdd(id); }" in bundle
+    # Both relationship directions route through the field's onAdd.
+    assert "props.onAddParent" in bundle
+    assert "props.onAddChild" in bundle
 
 
 def test_bulk_archive(client):
@@ -2252,3 +2247,123 @@ def test_dashboard_failed_card_highlight_class_exists():
     assert "hermes-kanban-card--failed" in js
     assert "hermes-kanban-card--failed" in css
     assert "failedIds" in js
+
+
+# ---------------------------------------------------------------------------
+# Per-run worker logs + comment run_id (invocations model)
+# ---------------------------------------------------------------------------
+
+def test_task_log_endpoint_serves_a_single_run(client, kanban_home):
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="logged")
+    finally:
+        conn.close()
+    logs = kanban_home / "kanban" / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / f"{tid}.run4.log").write_text("output for run four")
+
+    r = client.get(f"/api/plugins/kanban/tasks/{tid}/log?run=4")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["run"] == 4
+    assert body["exists"] is True
+    assert body["content"] == "output for run four"
+
+    # A run with no file on disk reports exists=False rather than another
+    # run's bytes.
+    r2 = client.get(f"/api/plugins/kanban/tasks/{tid}/log?run=9")
+    assert r2.json()["exists"] is False
+
+
+def test_task_log_endpoint_full_history_without_run(client, kanban_home):
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="multi-run")
+    finally:
+        conn.close()
+    logs = kanban_home / "kanban" / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / f"{tid}.run1.log").write_text("first")
+    (logs / f"{tid}.run2.log").write_text("second")
+
+    r = client.get(f"/api/plugins/kanban/tasks/{tid}/log")
+    assert r.status_code == 200
+    assert r.json()["content"] == "first\nsecond"
+
+
+def test_task_detail_serializes_comment_run_id(client, kanban_home):
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="task")
+        kb.add_comment(conn, tid, author="worker", body="from a run", run_id=3)
+        kb.add_comment(conn, tid, author="human", body="dashboard note")
+    finally:
+        conn.close()
+
+    r = client.get(f"/api/plugins/kanban/tasks/{tid}")
+    assert r.status_code == 200
+    by_author = {c["author"]: c for c in r.json()["comments"]}
+    assert by_author["worker"]["run_id"] == 3
+    assert by_author["human"]["run_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# Live worker-log streaming over WebSocket
+# ---------------------------------------------------------------------------
+
+def test_log_stream_ws_initial_and_append(client, kanban_home, monkeypatch):
+    # The dashboard session token is a random per-process value; align it so
+    # the WS auth accepts our test token.
+    monkeypatch.setattr("hermes_cli.web_server._SESSION_TOKEN", "test", raising=False)
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="streamed")
+    finally:
+        conn.close()
+    logs = kanban_home / "kanban" / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    logfile = logs / f"{tid}.run3.log"
+    logfile.write_text("hello from run 3\n")
+
+    url = f"/api/plugins/kanban/tasks/{tid}/log/stream?run=3&token=test"
+    with client.websocket_connect(url) as ws:
+        first = ws.receive_json()
+        assert first["run"] == 3
+        assert first["exists"] is True
+        assert "hello from run 3" in first["content"]
+
+        # Worker appends more output → server pushes it on its next poll tick.
+        with open(logfile, "a", encoding="utf-8") as f:
+            f.write("more streamed output\n")
+        frame = ws.receive_json()
+        assert "append" in frame
+        assert "more streamed output" in frame["append"]
+
+
+def test_log_stream_ws_handles_missing_file(client, kanban_home, monkeypatch):
+    monkeypatch.setattr("hermes_cli.web_server._SESSION_TOKEN", "test", raising=False)
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="no-log-yet")
+    finally:
+        conn.close()
+    url = f"/api/plugins/kanban/tasks/{tid}/log/stream?run=9&token=test"
+    with client.websocket_connect(url) as ws:
+        first = ws.receive_json()
+        assert first["exists"] is False
+        assert first["content"] == ""
+
+
+def test_log_stream_ws_rejects_missing_token(client, kanban_home):
+    from starlette.websockets import WebSocketDisconnect
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="auth")
+    finally:
+        conn.close()
+    url = f"/api/plugins/kanban/tasks/{tid}/log/stream?run=1"  # no token
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(url) as ws:
+            ws.receive_json()
