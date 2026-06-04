@@ -309,9 +309,9 @@ export class ChatStore {
         // Present in the fetched page — just load its transcript.
         await this.loadActiveMessages();
       } else {
-        // Absent from the page. Do NOT prune on absence alone: the listing is
-        // capped (DEFAULT_SESSIONS_PAGE_SIZE) so an older-but-valid active
-        // session can legitimately fall beyond the first page. Probe it
+        // Absent from the page. Do NOT prune on absence alone: the listing
+        // returned by the deps adapter is capped to one page, so an older-
+        // but-valid active session can legitimately fall beyond it. Probe it
         // directly via a message load; prune only on positive evidence it's
         // gone (the load failed).
         const ok = await this.loadActiveMessages();
@@ -323,9 +323,15 @@ export class ChatStore {
           // the active session is present in `sessions` — keeping the
           // activeSessionId pointer and the list consistent (and surviving
           // later refreshes via refreshSessions' retain-active logic).
-          const now = Math.floor(Date.now() / 1000);
           const id = this.state.activeSessionId;
           if (id && !this.state.sessions.some((s) => s.id === id)) {
+            // Order it by its real recency, not "now" — using now would make an
+            // old session sort to the top. Fall back to 0 (oldest) when the
+            // transcript carries no timestamps, so it lands at the bottom.
+            const lastTs = this.state.messages.reduce(
+              (max, m) => (m.timestamp && m.timestamp > max ? m.timestamp : max),
+              0,
+            );
             this.setState({
               sessions: sortSessions([
                 ...this.state.sessions,
@@ -334,8 +340,8 @@ export class ChatStore {
                   title: null,
                   profile: null,
                   model: null,
-                  createdAt: now,
-                  lastActive: now,
+                  createdAt: lastTs,
+                  lastActive: lastTs,
                   preview: null,
                   messageCount: this.state.messages.length,
                 },
@@ -372,9 +378,9 @@ export class ChatStore {
         return s;
       });
       // Retain the active session even if it's not in the fetched page. The
-      // listing is capped (DEFAULT_SESSIONS_PAGE_SIZE), so a valid active
-      // session can fall beyond page 1 (see hydrate's reconciliation). Dropping
-      // it here would desync the `activeSessionId` pointer from `sessions` —
+      // deps adapter caps the listing to one page, so a valid active session
+      // can fall beyond it (see hydrate's reconciliation). Dropping it here
+      // would desync the `activeSessionId` pointer from `sessions` —
       // `getActiveSession()` would return null and a later refresh would evict
       // it from the list. Carry over its previously-known entry.
       const activeId = this.state.activeSessionId;
@@ -587,6 +593,10 @@ export class ChatStore {
       messages: [],
       widgetOpen: false,
       minimized: false,
+      // Also clear transient flags so a clear during an in-flight load or after
+      // an error doesn't leave the UI stuck spinning / showing a stale error.
+      loading: false,
+      error: null,
     });
   }
 }
