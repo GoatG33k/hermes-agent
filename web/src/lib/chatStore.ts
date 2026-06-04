@@ -84,6 +84,9 @@ export interface ChatMessage {
   content: string | null;
   timestamp?: number;
   toolName?: string;
+  /** Thinking/reasoning text streamed before the final response. Cleared when
+   *  the real response starts arriving so the bubble transitions cleanly. */
+  thinking?: string | null;
 }
 
 /** Immutable view of the whole store. */
@@ -102,6 +105,10 @@ export interface ChatStoreState {
   widgetOpen: boolean;
   /** Whether the open widget is minimized to its title bar. */
   minimized: boolean;
+  /** Widget width in pixels (persisted). */
+  widgetWidth: number;
+  /** Widget height in pixels (persisted). */
+  widgetHeight: number;
   /** Whether the initial server hydration has completed. */
   hydrated: boolean;
   /** Available chat profiles loaded from the server. */
@@ -125,6 +132,22 @@ export interface ChatStoreDeps {
   loadMessages(id: string): Promise<ChatMessage[]>;
   /** List available profiles for the chat profile selector. */
   listProfiles(): Promise<ChatProfile[]>;
+  /** Send a user message to the agent and stream the response via callbacks.
+   *  The agent may run multiple turns (tool calls between turns). `onTurnStart`
+   *  fires at the beginning of each turn; `onDone` fires once when the agent is
+   *  truly idle again (all turns complete). */
+  sendMessage(
+    sessionId: string,
+    content: string,
+    handlers: {
+      onTurnStart(): void;
+      onThinkingDelta(text: string): void;
+      onDelta(text: string): void;
+      onTurnComplete(): void;
+      onDone(): void;
+      onError(msg: string): void;
+    },
+  ): Promise<void>;
 }
 
 export interface ChatProfile {
@@ -149,6 +172,8 @@ export interface PersistedChatState {
   activeSessionId: string | null;
   widgetOpen: boolean;
   minimized: boolean;
+  widgetWidth?: number;
+  widgetHeight?: number;
 }
 
 const STORAGE_KEY = "hermes.chat.v1";
@@ -161,6 +186,8 @@ const INITIAL_STATE: ChatStoreState = Object.freeze({
   error: null,
   widgetOpen: false,
   minimized: false,
+  widgetWidth: 380,
+  widgetHeight: 500,
   hydrated: false,
   profiles: [],
 });
@@ -189,6 +216,8 @@ export function localStoragePersistence(
           // not write the corrected value back to storage here; it gets
           // re-persisted on the next state change that calls persist().
           minimized: widgetOpen && parsed.minimized === true,
+          widgetWidth: typeof parsed.widgetWidth === "number" ? parsed.widgetWidth : 380,
+          widgetHeight: typeof parsed.widgetHeight === "number" ? parsed.widgetHeight : 500,
         };
       } catch {
         return null;
@@ -284,6 +313,8 @@ export class ChatStore {
       activeSessionId: this.state.activeSessionId,
       widgetOpen: this.state.widgetOpen,
       minimized: this.state.minimized,
+      widgetWidth: this.state.widgetWidth,
+      widgetHeight: this.state.widgetHeight,
     });
   }
 
@@ -307,6 +338,8 @@ export class ChatStore {
         activeSessionId: persisted.activeSessionId,
         widgetOpen: persisted.widgetOpen,
         minimized: persisted.minimized,
+        widgetWidth: persisted.widgetWidth ?? 380,
+        widgetHeight: persisted.widgetHeight ?? 500,
       });
     }
 
@@ -559,6 +592,108 @@ export class ChatStore {
    * the in-progress message in their own component state), otherwise the
    * transcript and `messageCount` would inflate with partial fragments.
    */
+  async sendMessage(sessionId: string, content: string): Promise<void> {
+    this.setState({ loading: true, error: null });
+    let turnCount = 0;
+    let responseStarted = false;
+    // Batch streaming updates: accumulate thinking + response chunks and flush
+    // at most every ~33ms. This avoids saturating React with one state commit
+    // per token when providers emit high-frequency streaming chunks.
+    let pendingThinking = "";
+    let pendingDelta = "";
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleFlush = () => {
+      if (flushTimer !== null) return;
+      flushTimer = setTimeout(flushStreamBuffers, 33);
+    };
+    const flushStreamBuffers = () => {
+      if (flushTimer !== null) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      if (!pendingThinking && !pendingDelta) return;
+      const msgs = [...this.state.messages];
+      const last = msgs[msgs.length - 1];
+      if (last?.role === "assistant") {
+        const nextThinking =
+          !responseStarted && pendingThinking
+            ? (last.thinking ?? "") + pendingThinking
+            : last.thinking;
+        const nextContent = pendingDelta
+          ? (last.content ?? "") + pendingDelta
+          : last.content;
+        msgs[msgs.length - 1] = {
+          ...last,
+          thinking: responseStarted ? null : nextThinking,
+          content: nextContent,
+        };
+        this.setState({ messages: msgs });
+      }
+      pendingThinking = "";
+      pendingDelta = "";
+    };
+
+    await this.deps.sendMessage(sessionId, content, {
+      onTurnStart: () => {
+        turnCount++;
+        responseStarted = false;
+        pendingThinking = "";
+        pendingDelta = "";
+        if (flushTimer !== null) {
+          clearTimeout(flushTimer);
+          flushTimer = null;
+        }
+        if (turnCount === 1) {
+          // First turn: append a fresh assistant bubble.
+          this.setState({
+            messages: [
+              ...this.state.messages,
+              { role: "assistant", content: null, thinking: null, timestamp: Math.floor(Date.now() / 1000) },
+            ],
+          });
+        } else {
+          // Subsequent turn (agent doing more work after tool calls): replace
+          // the current bubble so only the final answer is visible.
+          const msgs = [...this.state.messages];
+          const last = msgs[msgs.length - 1];
+          if (last?.role === "assistant") {
+            msgs[msgs.length - 1] = { ...last, content: null, thinking: null };
+            this.setState({ messages: msgs });
+          }
+        }
+      },
+      onThinkingDelta: (text: string) => {
+        if (responseStarted || !text) return;
+        pendingThinking += text;
+        scheduleFlush();
+      },
+      onDelta: (text: string) => {
+        if (!text) return;
+        responseStarted = true;
+        pendingThinking = "";
+        pendingDelta += text;
+        // First response token should feel immediate; later chunks are batched.
+        if (pendingDelta.length === text.length) {
+          flushStreamBuffers();
+        } else {
+          scheduleFlush();
+        }
+      },
+      onTurnComplete: () => {
+        // Flush any remaining buffered chunks before the turn ends.
+        flushStreamBuffers();
+      },
+      onDone: () => {
+        flushStreamBuffers();
+        this.setState({ loading: false });
+      },
+      onError: (msg: string) => {
+        flushStreamBuffers();
+        this.setState({ loading: false, error: msg });
+      },
+    });
+  }
+
   appendMessage(message: ChatMessage): void {
     if (!this.state.activeSessionId) return;
     const id = this.state.activeSessionId;
@@ -612,6 +747,15 @@ export class ChatStore {
    *  violated. */
   setMinimized(minimized: boolean): void {
     this.setState({ minimized: minimized && this.state.widgetOpen });
+    this.persist();
+  }
+
+  /** Set the widget dimensions with reasonable constraints. */
+  setWidgetSize(width: number, height: number): void {
+    // Constrain to reasonable min/max to prevent broken layouts
+    const w = Math.max(280, Math.min(width, window.innerWidth - 32));
+    const h = Math.max(200, Math.min(height, window.innerHeight - 32));
+    this.setState({ widgetWidth: w, widgetHeight: h });
     this.persist();
   }
 

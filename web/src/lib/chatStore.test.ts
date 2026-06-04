@@ -60,6 +60,12 @@ function makeFakeBackend(initial: ChatSession[] = []) {
         { name: "coder", is_default: false, model: "claude-3", provider: "anthropic" },
       ];
     },
+    async sendMessage(_id, _content, handlers) {
+      handlers.onTurnStart();
+      handlers.onDelta("ok");
+      handlers.onTurnComplete();
+      handlers.onDone();
+    },
   };
 
   return {
@@ -295,6 +301,16 @@ describe("ChatStore — messages per session", () => {
         return [session("slow"), session("fast")];
       },
       async deleteSession() {},
+      async listProfiles() {
+        return [];
+      },
+      async sendMessage(_id, _content, handlers) {
+        handlers.onTurnStart();
+        handlers.onThinkingDelta("thinking...");
+        handlers.onDelta("ok");
+        handlers.onTurnComplete();
+        handlers.onDone();
+      },
       loadMessages(id) {
         return new Promise<ChatMessage[]>((resolve) => {
           resolvers[id] = resolve;
@@ -329,6 +345,16 @@ describe("ChatStore — messages per session", () => {
         return [session("s1")];
       },
       async deleteSession() {},
+      async listProfiles() {
+        return [];
+      },
+      async sendMessage(_id, _content, handlers) {
+        handlers.onTurnStart();
+        handlers.onThinkingDelta("thinking...");
+        handlers.onDelta("ok");
+        handlers.onTurnComplete();
+        handlers.onDone();
+      },
       loadMessages() {
         return new Promise<ChatMessage[]>((r) => {
           resolveLoad = r;
@@ -357,6 +383,16 @@ describe("ChatStore — messages per session", () => {
         return []; // nothing in the listing
       },
       async deleteSession() {},
+      async listProfiles() {
+        return [];
+      },
+      async sendMessage(_id, _content, handlers) {
+        handlers.onTurnStart();
+        handlers.onThinkingDelta("thinking...");
+        handlers.onDelta("ok");
+        handlers.onTurnComplete();
+        handlers.onDone();
+      },
       async loadMessages(id) {
         if (id === "deep-link") return [{ role: "user", content: "hi" }];
         throw new Error("not found");
@@ -383,6 +419,16 @@ describe("ChatStore — messages per session", () => {
         return [session("s1")];
       },
       async deleteSession() {},
+      async listProfiles() {
+        return [];
+      },
+      async sendMessage(_id, _content, handlers) {
+        handlers.onTurnStart();
+        handlers.onThinkingDelta("thinking...");
+        handlers.onDelta("ok");
+        handlers.onTurnComplete();
+        handlers.onDone();
+      },
       loadMessages() {
         return new Promise<ChatMessage[]>((r) => {
           resolveLoad = r;
@@ -421,6 +467,8 @@ describe("ChatStore — persistence across refresh", () => {
       activeSessionId: id,
       widgetOpen: true,
       minimized: true,
+      widgetWidth: 380,
+      widgetHeight: 500,
     });
 
     // --- "page refresh": brand-new store over the same persistence + backend
@@ -476,6 +524,16 @@ describe("ChatStore — persistence across refresh", () => {
         return [session("recent-1"), session("recent-2")]; // page 1, no old-session
       },
       async deleteSession() {},
+      async listProfiles() {
+        return [];
+      },
+      async sendMessage(_id, _content, handlers) {
+        handlers.onTurnStart();
+        handlers.onThinkingDelta("thinking...");
+        handlers.onDelta("ok");
+        handlers.onTurnComplete();
+        handlers.onDone();
+      },
       async loadMessages(id) {
         if (id === "old-session") return [{ role: "user", content: "hi" }];
         throw new Error("not found");
@@ -513,6 +571,8 @@ describe("ChatStore — persistence across refresh", () => {
       "activeSessionId",
       "widgetOpen",
       "minimized",
+      "widgetWidth",
+      "widgetHeight",
     ]);
   });
 
@@ -571,6 +631,8 @@ describe("ChatStore — widget state", () => {
       activeSessionId: null,
       widgetOpen: false,
       minimized: false,
+      widgetWidth: 380,
+      widgetHeight: 500,
     });
   });
 
@@ -666,12 +728,14 @@ describe("localStoragePersistence", () => {
     } as unknown as Storage;
 
     const p = localStoragePersistence(fakeStorage);
-    p.write({ activeSessionId: "x", widgetOpen: true, minimized: false });
+    p.write({ activeSessionId: "x", widgetOpen: true, minimized: false, widgetWidth: 380, widgetHeight: 500 });
 
     expect(p.read()).toEqual({
       activeSessionId: "x",
       widgetOpen: true,
       minimized: false,
+      widgetWidth: 380,
+      widgetHeight: 500,
     });
 
     p.clear();
@@ -709,6 +773,8 @@ describe("localStoragePersistence", () => {
       activeSessionId: "s1",
       widgetOpen: false,
       minimized: false,
+      widgetWidth: 380,
+      widgetHeight: 500,
     });
   });
 

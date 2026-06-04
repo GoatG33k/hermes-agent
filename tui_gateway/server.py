@@ -2927,6 +2927,7 @@ def _(rid, params: dict) -> dict:
     ready = threading.Event()
     now = time.time()
     session_profile = str(params.get("profile") or "").strip() or None
+    session_source = str(params.get("source") or "").strip() or "tui"
 
     with _sessions_lock:
         _sessions[sid] = {
@@ -2949,6 +2950,7 @@ def _(rid, params: dict) -> dict:
             "profile": session_profile,
             "running": False,
             "session_key": key,
+            "session_source": session_source,
             "show_reasoning": _load_show_reasoning(),
             "slash_worker": None,
             "tool_progress_mode": _load_tool_progress_mode(),
