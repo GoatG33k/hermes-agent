@@ -200,6 +200,19 @@ def _connect(board: Optional[str] = None):
 _AUTO_HEARTBEAT_MIN_INTERVAL_SECONDS = 60.0
 _auto_heartbeat_last_attempt: float = 0.0
 
+# Live-steer poll: how often a running worker checks its task's comment thread
+# for new operator input to inject into the conversation, and the per-process
+# watermark of the highest comment id already injected (or already present in
+# the spawn context). A worker process serves exactly one task/run, so
+# module-global state is sufficient and resets when the next run spawns. The
+# `initialized` flag distinguishes "first poll — watermark past the spawn-time
+# thread" from "no comments yet" so the first operator steer on an empty thread
+# is not mistaken for pre-existing context.
+_AUTO_STEER_MIN_INTERVAL_SECONDS = 3.0
+_auto_steer_last_attempt: float = 0.0
+_auto_steer_seen_comment_id: int = 0
+_auto_steer_initialized: bool = False
+
 
 def heartbeat_current_worker_from_env() -> bool:
     """Best-effort: extend the kanban claim + bump board heartbeat for the
@@ -258,6 +271,74 @@ def heartbeat_current_worker_from_env() -> bool:
     except Exception:
         logger.debug("auto-heartbeat: bridge failed", exc_info=True)
         return False
+
+
+def inject_pending_comment_steers(agent) -> bool:
+    """Best-effort: deliver new comments on the current worker's task to the
+    running agent as live steers, so an operator can redirect an in-flight run
+    from the dashboard without blocking/respawning it.
+
+    Identity comes from ``HERMES_KANBAN_TASK`` (task id) and ``HERMES_PROFILE``
+    (this worker's author name). Only comments that are (a) newer than the last
+    one we injected and (b) authored by someone OTHER than this worker are
+    delivered — the worker's own comments and the pre-run thread (already in its
+    spawn context via ``build_worker_context``) are skipped. ``agent.steer`` is
+    non-interrupting: the text lands at the agent's next iteration boundary.
+
+    Rate-limited via the module-level monotonic timestamp; best-effort and
+    never raises into the agent loop. Returns True only when at least one steer
+    was injected (informational).
+    """
+    global _auto_steer_last_attempt, _auto_steer_seen_comment_id, _auto_steer_initialized
+    tid = os.environ.get("HERMES_KANBAN_TASK")
+    if not tid or agent is None or not hasattr(agent, "steer"):
+        return False
+    import time as _time
+    now = _time.monotonic()
+    if (now - _auto_steer_last_attempt) < _AUTO_STEER_MIN_INTERVAL_SECONDS:
+        return False
+    _auto_steer_last_attempt = now
+
+    self_author = os.environ.get("HERMES_PROFILE") or "worker"
+    try:
+        kb, conn = _connect()
+        try:
+            comments = kb.list_comments(conn, tid)
+        finally:
+            conn.close()
+    except Exception:
+        logger.debug("auto-steer: list_comments failed", exc_info=True)
+        return False
+
+    max_id = max((c.id for c in comments), default=0)
+
+    # First poll of this run: the existing thread was already handed to the
+    # worker at spawn (build_worker_context), so watermark past it — even when
+    # the thread is empty — without replaying anything.
+    if not _auto_steer_initialized:
+        _auto_steer_seen_comment_id = max_id
+        _auto_steer_initialized = True
+        return False
+
+    pending = [
+        c for c in comments
+        if c.id > _auto_steer_seen_comment_id and (c.author or "") != self_author
+    ]
+    # Advance the watermark past everything we've now seen (including our own
+    # new comments) so we never rescan them.
+    _auto_steer_seen_comment_id = max(_auto_steer_seen_comment_id, max_id)
+    if not pending:
+        return False
+
+    injected = False
+    for c in pending:
+        text = f"[Operator steer — {c.author or 'operator'}]: {c.body}"
+        try:
+            if agent.steer(text):
+                injected = True
+        except Exception:
+            logger.debug("auto-steer: agent.steer failed", exc_info=True)
+    return injected
 
 
 def _ok(**fields: Any) -> str:
@@ -709,7 +790,13 @@ def _handle_comment(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
-            cid = kb.add_comment(conn, tid, author=author, body=str(body))
+            # Attribute the comment to this worker's run when it's commenting
+            # on its own task, so the dashboard can group a run's output.
+            # Cross-task handoff comments carry no run id (see _worker_run_id).
+            cid = kb.add_comment(
+                conn, tid, author=author, body=str(body),
+                run_id=_worker_run_id(tid),
+            )
             return _ok(task_id=tid, comment_id=cid)
         finally:
             conn.close()

@@ -940,6 +940,7 @@ class Comment:
     author: str
     body: str
     created_at: int
+    run_id: Optional[int] = None
 
 
 @dataclass
@@ -1051,7 +1052,8 @@ CREATE TABLE IF NOT EXISTS task_comments (
     task_id    TEXT NOT NULL,
     author     TEXT NOT NULL,
     body       TEXT NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    run_id     INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS task_events (
@@ -1714,13 +1716,34 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     if "run_id" not in ev_cols:
         _add_column_if_missing(conn, "task_events", "run_id", "run_id INTEGER")
 
+    # task_comments gained a run_id column so a worker's comments can be
+    # attributed to the invocation that produced them. Human/dashboard
+    # comments stay NULL (they don't belong to any single run). Historical
+    # comments predate runs and back-fill as NULL. Guard on table existence:
+    # partial/legacy schemas may reach this migration before task_comments
+    # is created (PRAGMA on a missing table returns empty, which would
+    # otherwise drive _add_column_if_missing into a "no such table" error).
+    cmt_table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_comments'"
+    ).fetchone()
+    if cmt_table:
+        cmt_cols = {row["name"] for row in conn.execute("PRAGMA table_info(task_comments)")}
+        if "run_id" not in cmt_cols:
+            _add_column_if_missing(conn, "task_comments", "run_id", "run_id INTEGER")
+
     # Same ordering rule as the additive ``tasks`` indexes above: create the
-    # index after the additive column migration so legacy ``task_events``
-    # tables don't fail during SCHEMA_SQL execution before ``run_id`` exists.
+    # index after the additive column migration so legacy ``task_events`` and
+    # ``task_comments`` tables don't fail during SCHEMA_SQL execution before
+    # their ``run_id`` columns exist.
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_events_run "
         "ON task_events(run_id, id)"
     )
+    if cmt_table:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_comments_run "
+            "ON task_comments(run_id, id)"
+        )
 
     notify_table_exists = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='kanban_notify_subs'"
@@ -1835,7 +1858,7 @@ _REBUILD_SPECS = {
         "CREATE TABLE task_comments ("
         " id INTEGER PRIMARY KEY AUTOINCREMENT,"
         " task_id TEXT NOT NULL, author TEXT NOT NULL, body TEXT NOT NULL,"
-        " created_at INTEGER NOT NULL)",
+        " created_at INTEGER NOT NULL, run_id INTEGER)",
         ("CREATE INDEX idx_comments_task ON task_comments(task_id, created_at)",),
     ),
     "task_runs": (
@@ -2520,8 +2543,13 @@ def parent_results(conn: sqlite3.Connection, task_id: str) -> list[tuple[str, Op
 # ---------------------------------------------------------------------------
 
 def add_comment(
-    conn: sqlite3.Connection, task_id: str, author: str, body: str
+    conn: sqlite3.Connection, task_id: str, author: str, body: str,
+    *, run_id: Optional[int] = None,
 ) -> int:
+    """Append a comment. ``run_id`` attributes the comment to a dispatcher
+    invocation — the worker's ``kanban_comment`` tool passes its own run id so
+    the dashboard can group a run's output together. Human / dashboard / CLI
+    comments leave it None (they don't belong to any single run)."""
     if not body or not body.strip():
         raise ValueError("comment body is required")
     if not author or not author.strip():
@@ -2533,11 +2561,14 @@ def add_comment(
         ).fetchone():
             raise ValueError(f"unknown task {task_id}")
         cur = conn.execute(
-            "INSERT INTO task_comments (task_id, author, body, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            (task_id, author.strip(), body.strip(), now),
+            "INSERT INTO task_comments (task_id, author, body, created_at, run_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (task_id, author.strip(), body.strip(), now, run_id),
         )
-        _append_event(conn, task_id, "commented", {"author": author, "len": len(body)})
+        _append_event(
+            conn, task_id, "commented",
+            {"author": author, "len": len(body)}, run_id=run_id,
+        )
         return int(cur.lastrowid or 0)
 
 
@@ -2553,6 +2584,7 @@ def list_comments(conn: sqlite3.Connection, task_id: str) -> list[Comment]:
             author=r["author"],
             body=r["body"],
             created_at=r["created_at"],
+            run_id=(r["run_id"] if "run_id" in r.keys() and r["run_id"] is not None else None),
         )
         for r in rows
     ]
@@ -4447,11 +4479,12 @@ def decompose_triage_task(
                 child_ws_path = root_ws_path
             else:
                 child_ws_path = None
+            child_priority = int(child.get("priority") or 0)
             conn.execute(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, workspace_kind, "
-                " workspace_path, tenant, created_at, created_by) "
-                "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?)",
+                " workspace_path, tenant, created_at, created_by, priority) "
+                "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?, ?)",
                 (
                     new_id,
                     title,
@@ -4462,6 +4495,7 @@ def decompose_triage_task(
                     tenant,
                     now,
                     (author or "decomposer"),
+                    child_priority,
                 ),
             )
             _append_event(
@@ -6753,7 +6787,12 @@ def _default_spawn(
     # logs don't collide across boards that happen to share task ids.
     log_dir = worker_logs_dir(board=board)
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"{task.id}.log"
+    # One log file per run (invocation), keyed by the claim's run id, so the
+    # dashboard can show each attempt's output in isolation instead of every
+    # run concatenated into a single file. ``current_run_id`` is set by
+    # claim_task before we ever spawn; the None fallback inside
+    # worker_run_log_path is purely defensive.
+    log_path = worker_run_log_path(task.id, task.current_run_id, board=board)
     rotate_bytes, backup_count = worker_log_rotation_config()
     _rotate_worker_log(log_path, rotate_bytes, backup_count)
 
@@ -7419,8 +7458,10 @@ def gc_worker_logs(
 # ---------------------------------------------------------------------------
 
 def worker_log_path(task_id: str, *, board: Optional[str] = None) -> Path:
-    """Return the path to a worker's log file. The file may not exist
-    (task never spawned, or log already GC'd).
+    """Return the legacy per-task worker log path. The file may not exist —
+    workers now write one file per run (see :func:`worker_run_log_path`); this
+    path is only written for tasks that ran before logs were split per run, and
+    is read as a fallback for them.
 
     When ``board`` is None, resolves via the active board (env var →
     current-board file → default). The dispatcher always passes the
@@ -7429,14 +7470,50 @@ def worker_log_path(task_id: str, *, board: Optional[str] = None) -> Path:
     return worker_logs_dir(board=board) / f"{task_id}.log"
 
 
-def read_worker_log(
-    task_id: str, *, tail_bytes: Optional[int] = None,
-    board: Optional[str] = None,
-) -> Optional[str]:
-    """Read the worker log for ``task_id``. Returns None if the file
-    doesn't exist. If ``tail_bytes`` is set, only the last N bytes are
-    returned (useful for the dashboard drawer which shouldn't page megabytes)."""
-    path = worker_log_path(task_id, board=board)
+def worker_run_log_path(
+    task_id: str, run_id: Optional[int], *, board: Optional[str] = None
+) -> Path:
+    """Path to a single invocation's worker log: ``<task_id>.run<run_id>.log``.
+
+    Each dispatcher claim opens a fresh run, so naming the log by run id keeps
+    every attempt's output in its own file — the dashboard can show one run's
+    log in isolation instead of every run concatenated. ``run_id`` is None only
+    in defensive/legacy paths; we fall back to the per-task name then so nothing
+    writes to a ``.runNone.log`` file."""
+    if run_id is None:
+        return worker_log_path(task_id, board=board)
+    return worker_logs_dir(board=board) / f"{task_id}.run{run_id}.log"
+
+
+def list_worker_run_logs(
+    task_id: str, *, board: Optional[str] = None
+) -> list[tuple[int, Path]]:
+    """Return ``(run_id, path)`` for every per-run log on disk for ``task_id``,
+    sorted by run id ascending. Rotated backups (``.log.1``) are skipped."""
+    log_dir = worker_logs_dir(board=board)
+    if not log_dir.exists():
+        return []
+    prefix = f"{task_id}.run"
+    out: list[tuple[int, Path]] = []
+    for p in log_dir.iterdir():
+        name = p.name
+        if not name.startswith(prefix) or not name.endswith(".log"):
+            continue
+        mid = name[len(prefix):-len(".log")]
+        if not mid.isdigit():
+            continue
+        try:
+            if p.is_file():
+                out.append((int(mid), p))
+        except OSError:
+            continue
+    out.sort(key=lambda rp: rp[0])
+    return out
+
+
+def _read_log_text(path: Path, tail_bytes: Optional[int]) -> Optional[str]:
+    """Read a single log file, optionally only its last ``tail_bytes`` bytes.
+    Returns None if the file doesn't exist or can't be read."""
     if not path.exists():
         return None
     try:
@@ -7458,6 +7535,40 @@ def read_worker_log(
         return data.decode("utf-8", errors="replace")
     except OSError:
         return None
+
+
+def read_worker_log(
+    task_id: str, *, run_id: Optional[int] = None,
+    tail_bytes: Optional[int] = None,
+    board: Optional[str] = None,
+) -> Optional[str]:
+    """Read worker log output for ``task_id``. Returns None if there's nothing
+    to read.
+
+    With ``run_id`` set, reads that single invocation's log
+    (``<task_id>.run<run_id>.log``). Without it, returns the task's full
+    history: every per-run log concatenated in run order, falling back to the
+    legacy single ``<task_id>.log`` file for tasks that ran before logs were
+    split per run. ``tail_bytes`` caps the returned text to the last N bytes
+    (useful for the dashboard drawer which shouldn't page megabytes)."""
+    if run_id is not None:
+        return _read_log_text(worker_run_log_path(task_id, run_id, board=board), tail_bytes)
+
+    runs = list_worker_run_logs(task_id, board=board)
+    if not runs:
+        # Legacy single-file task (or never spawned).
+        return _read_log_text(worker_log_path(task_id, board=board), tail_bytes)
+
+    parts = [chunk for _rid, path in runs
+             if (chunk := _read_log_text(path, None)) is not None]
+    if not parts:
+        return None
+    combined = "\n".join(parts)
+    if tail_bytes is not None:
+        encoded = combined.encode("utf-8")
+        if len(encoded) > tail_bytes:
+            return encoded[-tail_bytes:].decode("utf-8", errors="replace")
+    return combined
 
 
 # ---------------------------------------------------------------------------
