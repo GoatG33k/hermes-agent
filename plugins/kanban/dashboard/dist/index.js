@@ -1021,9 +1021,15 @@
           columnName: "triage",
           assignees: availableProfiles,
           allTasks: allTasks,
+          board: board,
           onCancel: function () { setShowCreateTriage(false); },
           onSubmit: function (body) {
             createTask(body).then(function () { setShowCreateTriage(false); });
+          },
+          onSuccess: function () {
+            setShowCreateTriage(false);
+            loadBoard();
+            loadBoardList();
           },
         }) : null,
         selectedIds.size > 0 ? h(BulkActionBar, {
@@ -1696,6 +1702,21 @@
                 ? "— dispatcher decomposes new triage tasks automatically"
                 : "— triage tasks stay until you click ⚗ Decompose"),
           ),
+          h("div", { className: "flex items-center gap-2 text-xs" },
+            h(Label, { className: "text-xs shrink-0" }, "Max decomposed items"),
+            h(Input, {
+              type: "number",
+              min: 1,
+              value: (settings.max_decomposed_items != null ? settings.max_decomposed_items : 50).toString(),
+              onChange: function (e) {
+                var v = parseInt(e.target.value, 10);
+                if (Number.isFinite(v) && v >= 1) saveSettings({ max_decomposed_items: v });
+              },
+              className: "h-6 w-16 text-xs",
+            }),
+            h("span", { className: "text-[10px] text-muted-foreground" },
+              "— max tasks the plan preview may create"),
+          ),
         ) : h("div", { className: "text-xs text-muted-foreground" }, "Loading…"),
 
         h("div", { className: "border-t border-border pt-3 flex flex-col gap-2" },
@@ -2265,6 +2286,38 @@
     return null;
   }
 
+  function PlanSpinner() {
+    return h("div", { className: "hermes-kanban-plan-spinner" },
+      Array.from({ length: 9 }, function (_, i) { return h("div", { key: i }); })
+    );
+  }
+
+  function computeStages(tasks) {
+    var n = tasks.length;
+    var inDeg = new Array(n).fill(0);
+    var adj = tasks.map(function () { return []; });
+    tasks.forEach(function (task, i) {
+      (task.parents || []).forEach(function (p) {
+        if (p >= 0 && p < n) { adj[p].push(i); inDeg[i]++; }
+      });
+    });
+    var stages = [], current = [];
+    for (var i = 0; i < n; i++) { if (inDeg[i] === 0) current.push(i); }
+    while (current.length > 0) {
+      stages.push(current.slice());
+      var next = [];
+      current.forEach(function (node) {
+        adj[node].forEach(function (nb) { inDeg[nb]--; if (inDeg[nb] === 0) next.push(nb); });
+      });
+      current = next;
+    }
+    var seen = new Set(stages.reduce(function(a,b){return a.concat(b);},[]));
+    var rem = [];
+    for (var j = 0; j < n; j++) { if (!seen.has(j)) rem.push(j); }
+    if (rem.length > 0) stages.push(rem);
+    return stages;
+  }
+
   // -------------------------------------------------------------------------
   // Create task modal
   // -------------------------------------------------------------------------
@@ -2284,6 +2337,15 @@
     const [errors, setErrors] = useState({});
     const dialogRef = useRef(null);
 
+    const [step, setStep] = useState("compose");
+    const [previewResult, setPreviewResult] = useState(null);
+    const [previewTasks, setPreviewTasks] = useState([]);
+    const [additionalInstructions, setAdditionalInstructions] = useState("");
+    const [previewError, setPreviewError] = useState(null);
+    const [submitting, setSubmitting] = useState(false);
+    const [expandedIdxs, setExpandedIdxs] = useState(new Set());
+
+    var isTriage = props.columnName === "triage";
     var isDirty = !!(title.trim() || description.trim() || assignee.trim() ||
       skills.length > 0 || parent || goalMode ||
       workspacePath.trim() || workspaceKind !== "scratch");
@@ -2313,7 +2375,241 @@
       if (focusable.length > 0) {
         setTimeout(function () { focusable[0].focus(); }, 0);
       }
-    }, []);
+    }, [step]);
+
+    // --- preview helpers ---
+
+    function callPreview(extraInstructions) {
+      var trimmed = title.trim();
+      setStep("previewing");
+      setPreviewError(null);
+      setExpandedIdxs(new Set());
+      SDK.fetchJSON(withBoard(`${API}/decompose/preview`, props.board), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: trimmed,
+          body: description.trim() || null,
+          priority: Number(priority) || 0,
+          additional_instructions: (extraInstructions || "").trim() || null,
+        }),
+      }).then(function (res) {
+        if (!res.ok) {
+          setPreviewError(res.error || "Preview failed");
+          setStep("compose");
+          return;
+        }
+        setPreviewResult(res);
+        var initialTasks = res.fanout
+          ? (res.tasks || []).map(function (task) { return Object.assign({}, task); })
+          : [{ title: res.single_title || trimmed, body: res.single_body || "",
+               assignee: res.single_assignee || "", priority: res.single_priority || 0 }];
+        setPreviewTasks(initialTasks);
+        setAdditionalInstructions("");
+        setStep("preview");
+      }).catch(function (e) {
+        setPreviewError(String(e && e.message ? e.message : e));
+        setStep("compose");
+      });
+    }
+
+    function updatePreviewTask(idx, field, val) {
+      setPreviewTasks(function (prev) {
+        var next = prev.slice();
+        next[idx] = Object.assign({}, next[idx]);
+        next[idx][field] = val;
+        return next;
+      });
+    }
+
+    function toggleExpand(idx) {
+      setExpandedIdxs(function (prev) {
+        var next = new Set(prev);
+        if (next.has(idx)) next.delete(idx); else next.add(idx);
+        return next;
+      });
+    }
+
+    function buildCommonTaskFields() {
+      var fields = { priority: Number(priority) || 0 };
+      if (workspaceKind && workspaceKind !== "scratch") fields.workspace_kind = workspaceKind;
+      var wpTrim = workspacePath.trim();
+      if (wpTrim) fields.workspace_path = wpTrim;
+      if (parent) fields.parents = [parent];
+      if (skills.length > 0) fields.skills = skills;
+      if (goalMode) {
+        fields.goal_mode = true;
+        var gmt = parseInt(goalMaxTurns, 10);
+        if (Number.isFinite(gmt) && gmt > 0) fields.goal_max_turns = gmt;
+      }
+      return fields;
+    }
+
+    function doSubmitDecomposed() {
+      if (!previewResult || submitting) return;
+      setSubmitting(true);
+      setPreviewError(null);
+      var common = buildCommonTaskFields();
+      var fetchUrl, payload;
+      if (previewResult.fanout) {
+        fetchUrl = withBoard(`${API}/tasks/graph`, props.board);
+        payload = Object.assign({}, common, {
+          title: title.trim(),
+          body: description.trim() || null,
+          orchestrator: previewResult.orchestrator || null,
+          children: previewTasks.map(function (task, idx) {
+            var origParents = (previewResult.tasks && previewResult.tasks[idx])
+              ? (previewResult.tasks[idx].parents || []) : [];
+            return {
+              title: task.title,
+              body: task.body || null,
+              assignee: task.assignee || null,
+              parents: origParents,
+              priority: task.priority || 0,
+            };
+          }),
+        });
+      } else {
+        var singleTask = previewTasks[0] || {};
+        fetchUrl = withBoard(`${API}/tasks`, props.board);
+        payload = Object.assign({}, common, {
+          title: singleTask.title || title.trim(),
+          body: singleTask.body || description.trim() || null,
+          assignee: singleTask.assignee || null,
+          priority: singleTask.priority || Number(priority) || 0,
+          triage: false,
+        });
+      }
+      SDK.fetchJSON(fetchUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }).then(function () {
+        if (props.onSuccess) props.onSuccess();
+        else props.onCancel();
+      }).catch(function (e) {
+        setPreviewError(String(e && e.message ? e.message : e));
+        setSubmitting(false);
+      });
+    }
+
+    if (step === "previewing") {
+      return h("div", {
+        className: "hermes-kanban-dialog-backdrop",
+        onClick: function (e) { if (e.target === e.currentTarget) tryCancel(); },
+      },
+        h("div", { ref: dialogRef, className: "hermes-kanban-dialog" },
+          h("div", { className: "hermes-kanban-dialog-title" }, "Planning…"),
+          h("div", { className: "flex flex-col items-center gap-4 py-12" },
+            h(PlanSpinner),
+            h("div", { className: "text-xs text-muted-foreground mt-2" },
+              "Decomposing task into a plan…"),
+          ),
+          h("div", { className: "hermes-kanban-dialog-actions" },
+            h(Button, { type: "button", onClick: tryCancel, size: "sm", ghost: true },
+              tx(t, "cancel", "Cancel")),
+          ),
+        ),
+      );
+    }
+
+    if (step === "preview" && previewResult) {
+      var taskCount = previewResult.fanout ? previewTasks.length : 1;
+      var headerText = previewResult.fanout
+        ? ("Decomposition plan — " + taskCount + " task" + (taskCount === 1 ? "" : "s"))
+        : "Single task — no decomposition";
+      var hasRevisions = !!(additionalInstructions.trim());
+      var primaryLabel = hasRevisions ? "Revise"
+        : (previewResult.fanout ? ("Submit " + taskCount + " task" + (taskCount === 1 ? "" : "s")) : "Submit");
+      var primaryAction = hasRevisions
+        ? function () { callPreview(additionalInstructions); }
+        : doSubmitDecomposed;
+      var stages = previewResult.fanout ? computeStages(previewResult.tasks || []) : [[0]];
+
+      function renderTaskCard(idx) {
+        var task = previewTasks[idx];
+        var isExpanded = expandedIdxs.has(idx);
+        return h("div", { key: idx, className: "hermes-kanban-plan-card" },
+          h("div", { className: "hermes-kanban-plan-card-header",
+            onClick: function () { toggleExpand(idx); } },
+            previewResult.fanout
+              ? h("span", { className: "text-[10px] text-muted-foreground w-4 shrink-0 text-right" }, (idx + 1) + ".")
+              : null,
+            h("span", { className: "text-xs shrink-0 text-muted-foreground w-3" }, isExpanded ? "▾" : "▸"),
+            h("input", {
+              type: "text", value: task.title,
+              onClick: function (e) { e.stopPropagation(); },
+              onChange: function (e) { updatePreviewTask(idx, "title", e.target.value); },
+              className: "flex-1 text-xs font-medium bg-transparent border-none outline-none min-w-0",
+              style: { background: "transparent" },
+            }),
+            h("div", { className: "flex items-center gap-1.5 shrink-0",
+              onClick: function (e) { e.stopPropagation(); } },
+              h("div", { style: { minWidth: "80px" } },
+                h(ComboInput, { value: task.assignee || "",
+                  onChange: function (v) { updatePreviewTask(idx, "assignee", v); },
+                  options: props.assignees || [], allowEmpty: true, placeholder: "assignee" }),
+              ),
+              h("input", { type: "number", min: 0, title: "Priority",
+                value: (task.priority != null ? task.priority : 0),
+                onChange: function (e) { updatePreviewTask(idx, "priority", parseInt(e.target.value, 10) || 0); },
+                className: "w-10 text-xs border border-input bg-transparent px-1 py-0.5 rounded focus:outline-none focus:ring-1 focus:ring-ring text-center" }),
+            ),
+          ),
+          isExpanded && task.body
+            ? h("div", { className: "hermes-kanban-plan-card-body" },
+                h(MarkdownBlock, { source: task.body, enabled: true }))
+            : null,
+        );
+      }
+
+      return h("div", { className: "hermes-kanban-dialog-backdrop",
+        onClick: function (e) { if (e.target === e.currentTarget) tryCancel(); } },
+        h("div", { ref: dialogRef, className: "hermes-kanban-dialog" },
+          h("div", { className: "hermes-kanban-dialog-title" }, headerText),
+          previewResult.rationale ? h("p", {
+            className: "text-xs text-muted-foreground mb-3 leading-snug",
+          }, previewResult.rationale) : null,
+
+          h("div", { className: "flex flex-col gap-1 max-h-72 overflow-y-auto mb-3" },
+            previewResult.fanout
+              ? stages.map(function (stageIdxs, si) {
+                  var stageLabel = stageIdxs.length > 1
+                    ? ("Stage " + (si + 1) + " — " + stageIdxs.length + " parallel")
+                    : "Stage " + (si + 1);
+                  return h("div", { key: si, className: "flex flex-col gap-1" },
+                    h("div", { className: "hermes-kanban-plan-stage-header" }, stageLabel),
+                    stageIdxs.map(function (idx) { return renderTaskCard(idx); }),
+                  );
+                })
+              : [renderTaskCard(0)],
+          ),
+
+          h("div", { className: "flex flex-col gap-1 mb-1" },
+            h(Label, { className: "text-xs" }, "Revision instructions"),
+            h("textarea", {
+              value: additionalInstructions,
+              onChange: function (e) { setAdditionalInstructions(e.target.value); },
+              placeholder: "e.g. Split the database task into schema and migration steps…",
+              className: "text-sm min-h-[2.5rem] max-h-24 resize-y w-full border border-input bg-transparent px-2 py-1 rounded-md focus:outline-none focus:ring-2 focus:ring-ring",
+              rows: 2, disabled: submitting,
+            }),
+          ),
+          previewError ? h("p", { className: "text-xs text-destructive mb-1" }, previewError) : null,
+
+          h("div", { className: "hermes-kanban-dialog-actions" },
+            h(Button, { type: "button",
+              onClick: function () { setStep("compose"); setPreviewError(null); },
+              size: "sm", ghost: true, disabled: submitting }, "← Back"),
+            h(Button, { type: "button", onClick: primaryAction,
+              size: "sm", disabled: submitting },
+              submitting ? "Submitting…" : primaryLabel),
+          ),
+        ),
+      );
+    }
+
+    // --- step: compose (default) ---
 
     function submit(e) {
       if (e) e.preventDefault();
@@ -2324,11 +2620,19 @@
       if (aErr) newErrors.assignee = aErr;
       if (Object.keys(newErrors).length > 0) { setErrors(newErrors); return; }
       setErrors({});
+
+      if (isTriage) {
+        // Triage: run LLM preview before committing anything to DB
+        callPreview(null);
+        return;
+      }
+
+      // Non-triage: direct creation (existing behavior)
       var body = {
         title: trimmed,
         assignee: assignee.trim() || null,
         priority: Number(priority) || 0,
-        triage: props.columnName === "triage",
+        triage: false,
       };
       if (description.trim()) body.body = description.trim();
       if (parent) body.parents = [parent];
@@ -2336,6 +2640,25 @@
       if (workspaceKind && workspaceKind !== "scratch") {
         body.workspace_kind = workspaceKind;
       }
+      var wpTrim = workspacePath.trim();
+      if (wpTrim) body.workspace_path = wpTrim;
+      if (goalMode) {
+        body.goal_mode = true;
+        var gmt = parseInt(goalMaxTurns, 10);
+        if (Number.isFinite(gmt) && gmt > 0) body.goal_max_turns = gmt;
+      }
+      props.onSubmit(body);
+    }
+
+    function addToQueue() {
+      var trimmed = title.trim();
+      if (!trimmed) return;
+      var body = { title: trimmed, assignee: assignee.trim() || null,
+                   priority: Number(priority) || 0, triage: true };
+      if (description.trim()) body.body = description.trim();
+      if (parent) body.parents = [parent];
+      if (skills.length > 0) body.skills = skills;
+      if (workspaceKind && workspaceKind !== "scratch") body.workspace_kind = workspaceKind;
       var wpTrim = workspacePath.trim();
       if (wpTrim) body.workspace_path = wpTrim;
       if (goalMode) {
@@ -2375,9 +2698,9 @@
               onKeyDown: function (e) {
                 if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(e); }
               },
-              placeholder: props.columnName === "triage"
-                ? tx(t, "triagePlaceholder", "Rough idea — AI will spec it\u2026")
-                : tx(t, "taskTitlePlaceholder", "New task title\u2026"),
+              placeholder: isTriage
+                ? tx(t, "triagePlaceholder", "Rough idea — AI will spec it…")
+                : tx(t, "taskTitlePlaceholder", "New task title…"),
               className: "text-sm min-h-[2rem] max-h-32 resize-y w-full border border-input bg-transparent px-2 py-1 rounded-md focus:outline-none focus:ring-2 focus:ring-ring",
               rows: 2,
               autoFocus: true,
@@ -2392,7 +2715,7 @@
             h("textarea", {
               value: description,
               onChange: function (e) { setDescription(e.target.value); },
-              placeholder: tx(t, "descriptionPlaceholder", "Task description or opening post\u2026"),
+              placeholder: tx(t, "descriptionPlaceholder", "Task description or opening post…"),
               className: "text-sm min-h-[3rem] max-h-48 resize-y w-full border border-input bg-transparent px-2 py-1 rounded-md focus:outline-none focus:ring-2 focus:ring-ring",
               rows: 3,
             }),
@@ -2407,7 +2730,7 @@
                 onBlur: function (v) { var e = validateAssignee(v, props.assignees); setErrors(function(prev) { return Object.assign({}, prev, { assignee: e }); }); },
                 options: props.assignees || [],
                 allowEmpty: true,
-                placeholder: props.columnName === "triage"
+                placeholder: isTriage
                   ? tx(t, "specifier", "specifier")
                   : tx(t, "assigneePlaceholder", "assignee"),
               }),
@@ -2489,22 +2812,18 @@
               value: parent,
               onChange: setParent,
               tasks: props.allTasks || [],
-              placeholder: tx(t, "searchParentTask", "Search by title\u2026"),
+              placeholder: tx(t, "searchParentTask", "Search by title…"),
             }),
           ),
         ),
+        previewError ? h("p", { className: "text-xs text-destructive mt-2" }, previewError) : null,
         h("div", { className: "hermes-kanban-dialog-actions" },
-          h(Button, {
-            type: "button",
-            onClick: props.onCancel,
-            size: "sm",
-            ghost: true,
-          }, tx(t, "cancel", "Cancel")),
-          h(Button, {
-            type: "submit",
-            size: "sm",
-            disabled: !title.trim(),
-          }, tx(t, "create", "Create")),
+          h(Button, { type: "button", onClick: props.onCancel, size: "sm", ghost: true },
+            tx(t, "cancel", "Cancel")),
+          isTriage ? h(Button, { type: "button", onClick: addToQueue, size: "sm", ghost: true,
+            disabled: !title.trim() }, "Add to queue") : null,
+          h(Button, { type: "submit", size: "sm", disabled: !title.trim() },
+            isTriage ? "Plan →" : tx(t, "create", "Create")),
         ),
       ),
     );

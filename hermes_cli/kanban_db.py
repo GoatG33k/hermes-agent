@@ -4402,11 +4402,12 @@ def decompose_triage_task(
             title = child["title"].strip()
             body = child.get("body")
             assignee = _canonical_assignee(child.get("assignee"))
+            child_priority = int(child.get("priority") or 0)
             conn.execute(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, workspace_kind, "
-                " tenant, created_at, created_by) "
-                "VALUES (?, ?, ?, ?, 'todo', 'scratch', ?, ?, ?)",
+                " tenant, created_at, created_by, priority) "
+                "VALUES (?, ?, ?, ?, 'todo', 'scratch', ?, ?, ?, ?)",
                 (
                     new_id,
                     title,
@@ -4415,6 +4416,7 @@ def decompose_triage_task(
                     tenant,
                     now,
                     (author or "decomposer"),
+                    child_priority,
                 ),
             )
             _append_event(

@@ -2050,3 +2050,72 @@
 .hermes-kanban-trash-label {
   font-weight: 500;
 }
+
+/* ---- Plan preview spinner (3×3 pulsing grid) ----------------------- */
+.hermes-kanban-plan-spinner {
+  display: grid;
+  grid-template-columns: repeat(3, 9px);
+  grid-template-rows: repeat(3, 9px);
+  gap: 3px;
+}
+.hermes-kanban-plan-spinner > div {
+  width: 9px;
+  height: 9px;
+  background: var(--color-foreground, #e5e5e5);
+  border-radius: 2px;
+  animation: kanban-plan-pulse 1.3s ease-in-out infinite;
+  opacity: 0.12;
+}
+.hermes-kanban-plan-spinner > div:nth-child(1) { animation-delay: 0.00s; }
+.hermes-kanban-plan-spinner > div:nth-child(2) { animation-delay: 0.10s; }
+.hermes-kanban-plan-spinner > div:nth-child(3) { animation-delay: 0.20s; }
+.hermes-kanban-plan-spinner > div:nth-child(4) { animation-delay: 0.30s; }
+.hermes-kanban-plan-spinner > div:nth-child(5) { animation-delay: 0.15s; }
+.hermes-kanban-plan-spinner > div:nth-child(6) { animation-delay: 0.40s; }
+.hermes-kanban-plan-spinner > div:nth-child(7) { animation-delay: 0.50s; }
+.hermes-kanban-plan-spinner > div:nth-child(8) { animation-delay: 0.60s; }
+.hermes-kanban-plan-spinner > div:nth-child(9) { animation-delay: 0.35s; }
+@keyframes kanban-plan-pulse {
+  0%, 70%, 100% { opacity: 0.12; transform: scale(0.75); }
+  35%           { opacity: 1;    transform: scale(1); }
+}
+
+/* ---- Plan preview task cards --------------------------------------- */
+.hermes-kanban-plan-card {
+  border: 1px solid var(--color-border);
+  border-radius: calc(var(--radius, 4px) - 1px);
+  overflow: hidden;
+}
+.hermes-kanban-plan-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.hermes-kanban-plan-card-header:hover {
+  background: color-mix(in srgb, var(--color-muted) 20%, transparent);
+}
+.hermes-kanban-plan-card-body {
+  padding: 0 8px 8px;
+  border-top: 1px solid var(--color-border);
+}
+.hermes-kanban-plan-stage-header {
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-muted-foreground);
+  padding: 4px 0 2px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.hermes-kanban-plan-stage-header::before,
+.hermes-kanban-plan-stage-header::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--color-border);
+}

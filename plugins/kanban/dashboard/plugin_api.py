@@ -2269,6 +2269,178 @@ def decompose_task_endpoint(
 
 
 # ---------------------------------------------------------------------------
+# Decompose preview — LLM plan without DB writes
+# ---------------------------------------------------------------------------
+
+class DecomposePreviewBody(BaseModel):
+    title: str
+    body: Optional[str] = None
+    priority: int = 0
+    additional_instructions: Optional[str] = None
+
+
+@router.post("/decompose/preview")
+def decompose_preview(
+    payload: DecomposePreviewBody,
+    board: Optional[str] = Query(None),
+):
+    """Ask the LLM how it would decompose a task without writing to DB.
+
+    Returns the same shape as ``preview_decompose()`` in kanban_decompose.
+    Non-OK is NOT an HTTP error — the UI renders the reason inline.
+    Runs in FastAPI's threadpool (sync def) because the LLM call can take
+    minutes on reasoning models.
+    """
+    board = _resolve_board(board)
+    prev_env = os.environ.get("HERMES_KANBAN_BOARD")
+    try:
+        os.environ["HERMES_KANBAN_BOARD"] = board or kanban_db.DEFAULT_BOARD
+        from hermes_cli import kanban_decompose  # noqa: WPS433
+        result = kanban_decompose.preview_decompose(
+            title=payload.title,
+            body=payload.body or "",
+            parent_priority=payload.priority,
+            additional_instructions=payload.additional_instructions or "",
+        )
+    finally:
+        if prev_env is None:
+            os.environ.pop("HERMES_KANBAN_BOARD", None)
+        else:
+            os.environ["HERMES_KANBAN_BOARD"] = prev_env
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Task graph — create root + pre-planned children atomically
+# ---------------------------------------------------------------------------
+
+def _try_delete_task(conn: sqlite3.Connection, task_id: Optional[str]) -> None:
+    """Best-effort cleanup of an orphaned root task after a graph-create failure."""
+    if not task_id:
+        return
+    try:
+        kanban_db.delete_task(conn, task_id)
+    except Exception:
+        log.warning("tasks/graph: failed to clean up orphaned root %s", task_id)
+
+
+class ChildTaskSpec(BaseModel):
+    title: str
+    body: Optional[str] = None
+    assignee: Optional[str] = None
+    parents: list[int] = Field(default_factory=list)
+    priority: int = 0
+
+
+class TaskGraphBody(BaseModel):
+    title: str
+    body: Optional[str] = None
+    orchestrator: Optional[str] = None
+    priority: int = 0
+    workspace_kind: str = "scratch"
+    workspace_path: Optional[str] = None
+    parents: list[str] = Field(default_factory=list)
+    skills: Optional[list[str]] = None
+    goal_mode: bool = False
+    goal_max_turns: Optional[int] = None
+    tenant: Optional[str] = None
+    children: list[ChildTaskSpec]
+
+
+@router.post("/tasks/graph")
+def create_task_graph(
+    payload: TaskGraphBody,
+    board: Optional[str] = Query(None),
+):
+    """Create a root task plus all pre-planned children atomically.
+
+    Internally creates the root as triage then immediately fans it out via
+    ``kanban_db.decompose_triage_task``, which is already atomic.  The root
+    is only in triage for the duration of this request — it is never visible
+    to the dispatcher in that state.
+
+    The ``children`` count is capped by ``kanban.max_decomposed_items`` in
+    config.yaml (default 50).
+
+    Returns ``{task_id, child_ids}``.
+    """
+    board = _resolve_board(board)
+
+    # Enforce configurable children cap from config.
+    try:
+        from hermes_cli.config import load_config
+        _cfg = load_config() or {}
+    except Exception:
+        _cfg = {}
+    max_children = int((_cfg.get("kanban") or {}).get("max_decomposed_items", 50))
+    if len(payload.children) > max_children:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"children count ({len(payload.children)}) exceeds "
+                f"kanban.max_decomposed_items ({max_children})"
+            ),
+        )
+
+    conn = _conn(board=board)
+    root_id: Optional[str] = None
+    try:
+        root_id = kanban_db.create_task(
+            conn,
+            title=payload.title,
+            body=payload.body,
+            triage=True,
+            created_by="dashboard",
+            priority=payload.priority,
+            workspace_kind=payload.workspace_kind,
+            workspace_path=payload.workspace_path,
+            parents=payload.parents,
+            skills=payload.skills,
+            goal_mode=payload.goal_mode,
+            goal_max_turns=payload.goal_max_turns,
+            tenant=payload.tenant,
+        )
+        children = [
+            {
+                "title": c.title,
+                "body": c.body or "",
+                "assignee": c.assignee,
+                "parents": c.parents,
+                "priority": c.priority,
+            }
+            for c in payload.children
+        ]
+        child_ids = kanban_db.decompose_triage_task(
+            conn,
+            root_id,
+            root_assignee=payload.orchestrator,
+            children=children,
+            author="dashboard",
+        )
+        if child_ids is None:
+            # Root moved out of triage between create and decompose — shouldn't
+            # happen in practice since no other writer can see it yet, but we
+            # clean up defensively.
+            _try_delete_task(conn, root_id)
+            raise HTTPException(
+                status_code=500,
+                detail="task moved out of triage unexpectedly during graph creation",
+            )
+        return {"task_id": root_id, "child_ids": child_ids}
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        # decompose_triage_task rejected the children graph (cycle, bad index, …)
+        _try_delete_task(conn, root_id)
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        _try_delete_task(conn, root_id)
+        raise
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Orchestration settings (kanban.orchestrator_profile / default_assignee /
 # auto_decompose) — surfaced to the dashboard's settings panel
 # ---------------------------------------------------------------------------
@@ -2278,6 +2450,7 @@ class OrchestrationSettingsBody(BaseModel):
     default_assignee: Optional[str] = None
     auto_decompose: Optional[bool] = None
     auto_promote_children: Optional[bool] = None
+    max_decomposed_items: Optional[int] = None
 
 
 @router.get("/orchestration")
@@ -2294,6 +2467,7 @@ def get_orchestration_settings():
     explicit_default = (kanban_cfg.get("default_assignee") or "").strip()
     auto_decompose = bool(kanban_cfg.get("auto_decompose", True))
     auto_promote_children = bool(kanban_cfg.get("auto_promote_children", True))
+    max_decomposed_items = int(kanban_cfg.get("max_decomposed_items", 50))
 
     # Resolve fallbacks the same way the decomposer does.
     resolved_orch = explicit_orch
@@ -2317,6 +2491,7 @@ def get_orchestration_settings():
         "default_assignee": explicit_default,
         "auto_decompose": auto_decompose,
         "auto_promote_children": auto_promote_children,
+        "max_decomposed_items": max_decomposed_items,
         "resolved_orchestrator_profile": resolved_orch,
         "resolved_default_assignee": resolved_default,
         "active_profile": active_default,
@@ -2384,6 +2559,12 @@ def set_orchestration_settings(payload: OrchestrationSettingsBody):
 
     if payload.auto_promote_children is not None:
         kanban_section["auto_promote_children"] = bool(payload.auto_promote_children)
+
+    if payload.max_decomposed_items is not None:
+        val = int(payload.max_decomposed_items)
+        if val < 1:
+            raise HTTPException(status_code=400, detail="max_decomposed_items must be >= 1")
+        kanban_section["max_decomposed_items"] = val
 
     try:
         save_config(cfg)
