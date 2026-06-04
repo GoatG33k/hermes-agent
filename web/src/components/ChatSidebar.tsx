@@ -84,6 +84,8 @@ export function ChatSidebar({ channel, className }: ChatSidebarProps) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const gw = useMemo(() => new GatewayClient(), [version]);
 
+  const [profile, setProfile] = useState<string | null>(null);
+
   // Track latest profile in a ref so the effect closure always reads it.
   const profileRef = useRef(profile);
   profileRef.current = profile;
@@ -93,7 +95,6 @@ export function ChatSidebar({ channel, className }: ChatSidebarProps) {
   const [info, setInfo] = useState<SessionInfo>({});
   const [tools, setTools] = useState<ToolEntry[]>([]);
   const [modelOpen, setModelOpen] = useState(false);
-  const [profile, setProfile] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {

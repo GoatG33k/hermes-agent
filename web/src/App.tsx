@@ -95,6 +95,7 @@ import { useTheme } from "@/themes";
 import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
 import { api } from "@/lib/api";
 import type { StatusResponse } from "@/lib/api";
+import { ChatWidget } from "@/components/ChatWidget";
 
 function RootRedirect() {
   return <Navigate to="/sessions" replace />;
@@ -774,6 +775,8 @@ export default function App() {
       </div>
 
       <PluginSlot name="overlay" />
+
+      <ChatWidget />
     </div>
   );
 }

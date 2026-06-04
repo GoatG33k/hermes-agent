@@ -1308,6 +1308,7 @@ class APIServerAdapter(BasePlatformAdapter):
             "reasoning_tokens", "estimated_cost_usd", "actual_cost_usd",
             "api_call_count", "parent_session_id", "last_active", "preview",
             "_lineage_root_id",
+            "profile_name",
         )
         payload = {key: session.get(key) for key in safe_keys if key in session}
         # Avoid exposing full system prompts/model_config through the client API;
@@ -1408,7 +1409,10 @@ class APIServerAdapter(BasePlatformAdapter):
         system_prompt = body.get("system_prompt")
         if system_prompt is not None and not isinstance(system_prompt, str):
             return web.json_response(_openai_error("system_prompt must be a string", code="invalid_system_prompt"), status=400)
-        db.create_session(session_id, "api_server", model=str(model) if model else None, system_prompt=system_prompt)
+        profile = body.get("profile")
+        if profile is not None and not isinstance(profile, str):
+            return web.json_response(_openai_error("profile must be a string", code="invalid_profile"), status=400)
+        db.create_session(session_id, "api_server", model=str(model) if model else None, system_prompt=system_prompt, profile_name=profile)
         title = body.get("title")
         if title is not None:
             try:

@@ -3611,6 +3611,7 @@ def _(rid, params: dict) -> dict:
     lease, limit_message = _claim_active_session_slot(key, live_session_id=sid)
     if limit_message is not None:
         return _err(rid, 4090, limit_message)
+    session_source = str(params.get("source") or "").strip() or "tui"
 
     with _sessions_lock:
         _sessions[sid] = {
@@ -3636,6 +3637,7 @@ def _(rid, params: dict) -> dict:
             "profile": profile,
             "running": False,
             "session_key": key,
+            "session_source": session_source,
             "show_reasoning": _load_show_reasoning(),
             "slash_worker": None,
             "tool_progress_mode": _load_tool_progress_mode(),

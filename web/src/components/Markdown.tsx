@@ -1,4 +1,4 @@
-import { useMemo, type ReactNode } from "react";
+import { memo, useMemo, type ReactNode } from "react";
 
 /**
  * Lightweight markdown renderer for LLM output.
@@ -9,7 +9,7 @@ import { useMemo, type ReactNode } from "react";
  * appears to hug the final character instead of wrapping onto a new line
  * after a block element (paragraph/list/code/…).
  */
-export function Markdown({
+export const Markdown = memo(function Markdown({
   content,
   highlightTerms,
   streaming,
@@ -34,7 +34,7 @@ export function Markdown({
       {blocks.length === 0 && caret}
     </div>
   );
-}
+});
 
 function StreamingCaret() {
   return (
@@ -54,11 +54,16 @@ type BlockNode =
   | { type: "heading"; level: number; content: string }
   | { type: "hr" }
   | { type: "list"; ordered: boolean; items: string[] }
+  | { type: "table"; headers: string[]; rows: string[][] }
   | { type: "paragraph"; content: string };
 
 /* ------------------------------------------------------------------ */
 /*  Block parser                                                       */
 /* ------------------------------------------------------------------ */
+
+function parseTableRow(line: string): string[] {
+  return line.split("|").slice(1, -1).map((cell) => cell.trim());
+}
 
 function parseBlocks(text: string): BlockNode[] {
   const lines = text.split("\n");
@@ -102,6 +107,19 @@ function parseBlocks(text: string): BlockNode[] {
       continue;
     }
 
+    // Table: pipe-delimited with a separator row (| --- | --- |)
+    if (line.startsWith("|") && i + 1 < lines.length && /^\|[-:| ]+\|/.test(lines[i + 1])) {
+      const headers = parseTableRow(lines[i]);
+      i += 2; // skip header row + separator row
+      const rows: string[][] = [];
+      while (i < lines.length && lines[i].startsWith("|")) {
+        rows.push(parseTableRow(lines[i]));
+        i++;
+      }
+      blocks.push({ type: "table", headers, rows });
+      continue;
+    }
+
     // Unordered list
     if (/^[-*+]\s/.test(line)) {
       const items: string[] = [];
@@ -139,7 +157,8 @@ function parseBlocks(text: string): BlockNode[] {
       !lines[i].match(/^#{1,4}\s/) &&
       !lines[i].match(/^[-*+]\s/) &&
       !lines[i].match(/^\d+[.)]\s/) &&
-      !lines[i].match(/^[-*_]{3,}\s*$/)
+      !lines[i].match(/^[-*_]{3,}\s*$/) &&
+      !lines[i].startsWith("|")
     ) {
       paraLines.push(lines[i]);
       i++;
@@ -216,6 +235,38 @@ function Block({
         </Tag>
       );
     }
+
+    case "table":
+      return (
+        <div className="overflow-x-auto">
+          <table className="w-max text-xs border-collapse">
+            <thead>
+              <tr>
+                {block.headers.map((h, j) => (
+                  <th
+                    key={j}
+                    className="border border-border/40 px-2 py-1 text-left font-semibold bg-secondary/30 whitespace-nowrap"
+                  >
+                    <InlineContent text={h} highlightTerms={highlightTerms} />
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {block.rows.map((row, ri) => (
+                <tr key={ri} className={ri % 2 !== 0 ? "bg-secondary/10" : ""}>
+                  {row.map((cell, ci) => (
+                    <td key={ci} className="border border-border/40 px-2 py-1 max-w-[200px] break-words">
+                      <InlineContent text={cell} highlightTerms={highlightTerms} />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {caret}
+        </div>
+      );
 
     case "paragraph":
       return (
