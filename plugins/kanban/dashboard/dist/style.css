@@ -359,6 +359,21 @@
   }
 }
 
+/* On desktop (lg+, ≥1024px) the host app renders an in-flow page header bar
+   (PageHeaderProvider — h-14 / 3.5rem) at the top of the content column. The
+   drawer is a fixed, full-viewport overlay, so without an offset it rides up
+   over that header. Start the overlay flush beneath the header so the page
+   header stays visible and the drawer butts up against its bottom edge. */
+@media (min-width: 1024px) {
+  .hermes-kanban-drawer-shade {
+    top: 3.5rem;
+  }
+  .hermes-kanban-drawer {
+    height: calc(100dvh - 3.5rem);
+    max-height: calc(100dvh - 3.5rem);
+  }
+}
+
 .hermes-kanban-drawer-close {
   appearance: none;
   background: transparent;
@@ -489,13 +504,19 @@
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
+  /* Divider between drawer sections for readability/flow. */
+  border-top: 1px solid var(--color-border);
+  padding-top: 0.85rem;
+  margin-top: 0.5rem;
 }
 
 .hermes-kanban-section-head {
+  font-family: var(--font-mondwest, ui-sans-serif), sans-serif;
   font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.07em;
-  color: var(--color-muted-foreground);
+  font-weight: 400;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-primary);
 }
 
 .hermes-kanban-pre {
@@ -634,40 +655,49 @@
 
 /* ---- Dependency editor chips --------------------------------------- */
 
-.hermes-kanban-deps-row {
+/* Each related-task group (Parents / Children): a label, the existing links
+   as chips, and a search-to-add control stacked vertically — mirroring the
+   create-issue modal's field layout so the two surfaces read the same. */
+.hermes-kanban-deps-field {
   display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin-bottom: 0.4rem;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-bottom: 0.6rem;
 }
 .hermes-kanban-deps-label {
+  font-family: var(--font-mondwest, ui-sans-serif), sans-serif;
   font-size: 0.68rem;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
   color: var(--color-muted-foreground);
-  min-width: 4rem;
 }
 .hermes-kanban-deps-chips {
   display: flex;
   gap: 0.3rem;
   flex-wrap: wrap;
-  flex: 1;
-}
-.hermes-kanban-deps-empty {
-  font-size: 0.7rem;
-  color: var(--color-muted-foreground);
-  font-style: italic;
 }
 .hermes-kanban-dep-chip {
   display: inline-flex;
   align-items: center;
-  gap: 0.15rem;
-  padding: 0.1rem 0.35rem;
+  gap: 0.3rem;
+  max-width: 100%;
+  padding: 0.15rem 0.4rem;
   background: color-mix(in srgb, var(--color-foreground) 6%, transparent);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm, 0.25rem);
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 0.68rem;
+  font-size: 0.72rem;
   color: var(--color-foreground);
+}
+.hermes-kanban-dep-chip-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 18rem;
+}
+.hermes-kanban-dep-chip-id {
+  flex: none;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.62rem;
+  color: var(--color-muted-foreground);
 }
 .hermes-kanban-dep-chip-x {
   appearance: none;
@@ -973,6 +1003,204 @@
   word-break: break-word;
   font-family: var(--font-mono, ui-monospace, monospace);
   background: transparent;
+}
+
+/* ---- Activity timeline (run-grouped history) ----------------------- */
+
+.hermes-kanban-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+/* Run-card extras (the card itself reuses .hermes-kanban-run* above). */
+.hermes-kanban-run-attempt {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-weight: 600;
+  color: var(--color-foreground);
+}
+.hermes-kanban-run-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.45rem;
+}
+.hermes-kanban-run-hb {
+  margin-top: 0.4rem;
+  font-size: 0.68rem;
+  color: var(--color-muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Loose / in-run lifecycle events as compact one-liners. */
+.hermes-kanban-tl-event {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.7rem;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--color-muted-foreground);
+}
+.hermes-kanban-tl-event-kind { color: var(--color-foreground); }
+.hermes-kanban-tl-event-detail {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hermes-kanban-tl-event-ago {
+  margin-left: auto;
+  flex: none;
+  opacity: 0.75;
+}
+/* Loose events between runs are the connective tissue of the timeline — give
+   them an accent marker + rail so they read as milestones and aren't missed. */
+.hermes-kanban-tl-event--loose {
+  align-items: center;
+  padding: 0.3rem 0.5rem;
+  color: var(--color-foreground);
+  border-left: 2px solid color-mix(in srgb, var(--color-primary) 55%, transparent);
+  background: color-mix(in srgb, var(--color-primary) 5%, transparent);
+}
+.hermes-kanban-tl-event--loose::before {
+  content: "◆";
+  flex: none;
+  font-size: 0.55rem;
+  color: var(--color-primary);
+}
+.hermes-kanban-tl-event--loose .hermes-kanban-tl-event-kind {
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+/* Per-run / full-log disclosure toggle. */
+.hermes-kanban-runlog { margin-top: 0.4rem; }
+.hermes-kanban-fulllog { margin-top: 0.6rem; }
+.hermes-kanban-runlog-toggle {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.68rem;
+  color: var(--color-muted-foreground);
+}
+.hermes-kanban-runlog-toggle:hover { color: var(--color-foreground); }
+.hermes-kanban-runlog .hermes-kanban-log { margin-top: 0.3rem; }
+
+/* Structured review/handoff card (replaces the raw JSON blob). */
+.hermes-kanban-handoff {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--color-border);
+  background: color-mix(in srgb, var(--color-primary) 4%, transparent);
+}
+.hermes-kanban-handoff-title {
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--color-foreground);
+}
+.hermes-kanban-handoff-pr {
+  width: fit-content;
+  font-size: 0.72rem;
+  color: var(--color-primary);
+  text-decoration: underline;
+}
+.hermes-kanban-handoff-row {
+  display: flex;
+  gap: 0.4rem;
+  font-size: 0.7rem;
+}
+.hermes-kanban-handoff-key {
+  min-width: 3.5rem;
+  color: var(--color-muted-foreground);
+}
+.hermes-kanban-handoff-val {
+  color: var(--color-foreground);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  word-break: break-word;
+}
+.hermes-kanban-handoff-files { font-size: 0.68rem; }
+.hermes-kanban-handoff-filelist,
+.hermes-kanban-handoff-decisions {
+  margin: 0.25rem 0 0;
+  padding-left: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.68rem;
+  color: var(--color-muted-foreground);
+}
+.hermes-kanban-handoff-filelist { font-family: var(--font-mono, ui-monospace, monospace); }
+.hermes-kanban-handoff-filelist li { list-style: none; }
+.hermes-kanban-handoff-decisions li { list-style: disc; }
+
+/* ---- Live-run panel (streaming console + steer box) ---------------- */
+
+.hermes-kanban-liverun {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0.5rem 0 0.25rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid color-mix(in srgb, var(--color-primary) 45%, var(--color-border));
+  background: color-mix(in srgb, var(--color-primary) 6%, transparent);
+}
+.hermes-kanban-liverun-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.hermes-kanban-liverun-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: #3fb97d;
+  animation: hermes-kanban-pulse 1.6s ease-out infinite;
+}
+@keyframes hermes-kanban-pulse {
+  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, #3fb97d 60%, transparent); }
+  70%  { box-shadow: 0 0 0 6px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+.hermes-kanban-liverun-label {
+  font-family: var(--font-mondwest, ui-sans-serif), sans-serif;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.72rem;
+  color: var(--color-primary);
+}
+.hermes-kanban-liverun-status {
+  margin-left: auto;
+  font-size: 0.65rem;
+  color: var(--color-muted-foreground);
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+.hermes-kanban-liverun-log {
+  margin: 0;
+  max-height: 300px;
+}
+.hermes-kanban-liverun-steer {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+}
+.hermes-kanban-liverun-input {
+  flex: 1;
+  min-width: 0;
+  height: 1.75rem;
+  font-size: 0.78rem;
+  padding: 0 0.5rem;
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-foreground);
+}
+.hermes-kanban-liverun-input:focus {
+  outline: none;
+  border-color: var(--color-ring);
 }
 
 /* -------------------------------------------------------------------------
@@ -1821,4 +2049,73 @@
 
 .hermes-kanban-trash-label {
   font-weight: 500;
+}
+
+/* ---- Plan preview spinner (3×3 pulsing grid) ----------------------- */
+.hermes-kanban-plan-spinner {
+  display: grid;
+  grid-template-columns: repeat(3, 9px);
+  grid-template-rows: repeat(3, 9px);
+  gap: 3px;
+}
+.hermes-kanban-plan-spinner > div {
+  width: 9px;
+  height: 9px;
+  background: var(--color-foreground, #e5e5e5);
+  border-radius: 2px;
+  animation: kanban-plan-pulse 1.3s ease-in-out infinite;
+  opacity: 0.12;
+}
+.hermes-kanban-plan-spinner > div:nth-child(1) { animation-delay: 0.00s; }
+.hermes-kanban-plan-spinner > div:nth-child(2) { animation-delay: 0.10s; }
+.hermes-kanban-plan-spinner > div:nth-child(3) { animation-delay: 0.20s; }
+.hermes-kanban-plan-spinner > div:nth-child(4) { animation-delay: 0.30s; }
+.hermes-kanban-plan-spinner > div:nth-child(5) { animation-delay: 0.15s; }
+.hermes-kanban-plan-spinner > div:nth-child(6) { animation-delay: 0.40s; }
+.hermes-kanban-plan-spinner > div:nth-child(7) { animation-delay: 0.50s; }
+.hermes-kanban-plan-spinner > div:nth-child(8) { animation-delay: 0.60s; }
+.hermes-kanban-plan-spinner > div:nth-child(9) { animation-delay: 0.35s; }
+@keyframes kanban-plan-pulse {
+  0%, 70%, 100% { opacity: 0.12; transform: scale(0.75); }
+  35%           { opacity: 1;    transform: scale(1); }
+}
+
+/* ---- Plan preview task cards --------------------------------------- */
+.hermes-kanban-plan-card {
+  border: 1px solid var(--color-border);
+  border-radius: calc(var(--radius, 4px) - 1px);
+  overflow: hidden;
+}
+.hermes-kanban-plan-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.hermes-kanban-plan-card-header:hover {
+  background: color-mix(in srgb, var(--color-muted) 20%, transparent);
+}
+.hermes-kanban-plan-card-body {
+  padding: 0 8px 8px;
+  border-top: 1px solid var(--color-border);
+}
+.hermes-kanban-plan-stage-header {
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-muted-foreground);
+  padding: 4px 0 2px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.hermes-kanban-plan-stage-header::before,
+.hermes-kanban-plan-stage-header::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--color-border);
 }

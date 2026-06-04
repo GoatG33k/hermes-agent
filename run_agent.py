@@ -2394,6 +2394,14 @@ class AIAgent:
                 # covers import-time failures (kanban_tools unavailable,
                 # etc.) on niche deployment surfaces.
                 pass
+            # Deliver any new operator comments on this task as live steers so
+            # the run can be redirected mid-flight from the dashboard without a
+            # block/respawn. Same best-effort contract as the heartbeat bridge.
+            try:
+                from tools.kanban_tools import inject_pending_comment_steers
+                inject_pending_comment_steers(self)
+            except Exception:
+                pass
 
     def _capture_rate_limits(self, http_response: Any) -> None:
         """Parse x-ratelimit-* headers from an HTTP response and cache the state.
