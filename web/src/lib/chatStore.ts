@@ -57,8 +57,7 @@
  */
 
 /** A chat session as the store tracks it. Mirrors the server's `SessionInfo`
- *  but trimmed to what the chat UI needs; extra server fields are preserved
- *  under `raw` for consumers that want them. */
+ *  but trimmed to what the chat UI needs. */
 export interface ChatSession {
   /** Server session id (gateway + REST share this id space). */
   id: string;

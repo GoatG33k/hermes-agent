@@ -27,6 +27,10 @@ import type {
   ChatStoreDeps,
 } from "@/lib/chatStore";
 
+/** How many sessions to fetch per listing. The chat registry rarely needs
+ *  more, and the store re-sorts client-side regardless. */
+const DEFAULT_SESSIONS_PAGE_SIZE = 100;
+
 function toChatSession(s: SessionInfo): ChatSession {
   return {
     id: s.id,
@@ -137,7 +141,7 @@ export function createGatewayChatDeps(
     async listSessions() {
       // Pull a healthy page; the chat list rarely needs more than this and the
       // store re-sorts client-side anyway.
-      const page = await api.getSessions(100, 0);
+      const page = await api.getSessions(DEFAULT_SESSIONS_PAGE_SIZE, 0);
       return page.sessions.map(toChatSession);
     },
 
