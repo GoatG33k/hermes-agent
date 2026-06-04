@@ -1474,6 +1474,21 @@ def _topo_sort(n: int, depends_on: list[list[int]]) -> list[int]:
     return order
 
 
+def _plan_summary(plan_id: str, tasks: list[dict]) -> str:
+    """Render a human-readable plan listing (shared by preview and modify)."""
+    lines = [f"Plan {plan_id} — {len(tasks)} task(s) staged (not yet created):"]
+    for i, t in enumerate(tasks):
+        dep_str = f" ← after [{', '.join(str(d) for d in t['depends_on'])}]" if t["depends_on"] else ""
+        parent_str = f" (child of {', '.join(t['parents'])})" if t["parents"] else ""
+        lines.append(f"  [{i}] {t['title']} → {t['assignee']}{parent_str}{dep_str}")
+        if t["body"]:
+            preview = t["body"][:100].replace("\n", " ")
+            ellipsis = "…" if len(t["body"]) > 100 else ""
+            lines.append(f"       {preview}{ellipsis}")
+    lines.append(f'\nCall kanban_plan_approve(plan_id="{plan_id}") to create these tasks.')
+    return "\n".join(lines)
+
+
 def _handle_plan_preview(args: dict, **kw) -> str:
     guard = _require_orchestrator_tool("kanban_plan_preview")
     if guard:
@@ -1539,18 +1554,211 @@ def _handle_plan_preview(args: dict, **kw) -> str:
             "created_at": time.time(),
         }
 
-    lines = [f"Plan {plan_id} — {len(validated)} task(s) staged (not yet created):"]
-    for i, t in enumerate(validated):
-        dep_str = f" ← after [{', '.join(str(d) for d in t['depends_on'])}]" if t["depends_on"] else ""
-        parent_str = f" (child of {', '.join(t['parents'])})" if t["parents"] else ""
-        lines.append(f"  [{i}] {t['title']} → {t['assignee']}{parent_str}{dep_str}")
-        if t["body"]:
-            preview = t["body"][:100].replace("\n", " ")
-            ellipsis = "…" if len(t["body"]) > 100 else ""
-            lines.append(f"       {preview}{ellipsis}")
-    lines.append(f'\nCall kanban_plan_approve(plan_id="{plan_id}") to create these tasks.')
+    return _ok(plan_id=plan_id, task_count=len(validated), preview=_plan_summary(plan_id, validated))
 
-    return _ok(plan_id=plan_id, task_count=len(validated), preview="\n".join(lines))
+
+def _handle_plan_modify(args: dict, **kw) -> str:
+    guard = _require_orchestrator_tool("kanban_plan_modify")
+    if guard:
+        return guard
+
+    plan_id = args.get("plan_id")
+    if not plan_id:
+        return tool_error("plan_id is required")
+
+    with _plan_lock:
+        _plan_sweep()
+        plan = _plan_store.get(str(plan_id))
+        if plan is None:
+            return tool_error(
+                f"plan {plan_id!r} not found — it may have expired or already been approved."
+            )
+        tasks = [t.copy() for t in plan["tasks"]]
+
+    updates = args.get("updates") or {}
+    remove  = args.get("remove")  or []
+    add     = args.get("add")     or []
+
+    # --- validate inputs ---
+    if not isinstance(updates, dict):
+        return tool_error("updates must be an object mapping string indices to field overrides")
+    if not isinstance(remove, list):
+        return tool_error("remove must be a list of integer indices")
+    if not isinstance(add, list):
+        return tool_error("add must be a list of task specs")
+
+    remove_set: set[int] = set()
+    for r in remove:
+        if not isinstance(r, int) or r < 0 or r >= len(tasks):
+            return tool_error(f"remove: index {r!r} is out of range (0–{len(tasks)-1})")
+        remove_set.add(r)
+
+    # --- apply field updates (by original index, before removal) ---
+    _UPDATABLE = {
+        "title", "assignee", "body", "parents", "priority", "workspace_kind",
+        "workspace_path", "triage", "idempotency_key", "max_runtime_seconds",
+        "skills", "goal_mode", "goal_max_turns", "depends_on",
+    }
+    for key, patch in updates.items():
+        try:
+            idx = int(key)
+        except (TypeError, ValueError):
+            return tool_error(f"updates: key {key!r} must be a string integer index")
+        if idx < 0 or idx >= len(tasks):
+            return tool_error(f"updates: index {idx} is out of range (0–{len(tasks)-1})")
+        if not isinstance(patch, dict):
+            return tool_error(f"updates[{idx}]: value must be an object of field overrides")
+        unknown = set(patch) - _UPDATABLE
+        if unknown:
+            return tool_error(f"updates[{idx}]: unknown fields {sorted(unknown)}")
+        tasks[idx] = {**tasks[idx], **patch}
+
+    # --- build old→new index map after removal ---
+    new_idx = 0
+    old_to_new: dict[int, int] = {}
+    for old in range(len(tasks)):
+        if old not in remove_set:
+            old_to_new[old] = new_idx
+            new_idx += 1
+
+    # --- filter tasks and remap depends_on ---
+    kept: list[dict] = []
+    for old, t in enumerate(tasks):
+        if old in remove_set:
+            continue
+        remapped_deps = [old_to_new[d] for d in t.get("depends_on", []) if d not in remove_set]
+        kept.append({**t, "depends_on": remapped_deps})
+
+    # --- append new tasks ---
+    base = len(kept)
+    for j, spec in enumerate(add):
+        if not isinstance(spec, dict):
+            return tool_error(f"add[{j}]: must be an object")
+        title    = spec.get("title")
+        assignee = spec.get("assignee")
+        if not title:
+            return tool_error(f"add[{j}]: title is required")
+        if not assignee:
+            return tool_error(f"add[{j}]: assignee is required")
+        depends_on = spec.get("depends_on") or []
+        if not isinstance(depends_on, list):
+            return tool_error(f"add[{j}]: depends_on must be a list of indices")
+        for d in depends_on:
+            if not isinstance(d, int) or d < 0 or d >= base + j:
+                return tool_error(
+                    f"add[{j}]: depends_on index {d} is out of range (0–{base + j - 1})"
+                )
+        kept.append({
+            "title":               str(title).strip(),
+            "assignee":            str(assignee).strip(),
+            "body":                spec.get("body"),
+            "parents":             list(spec.get("parents") or []),
+            "priority":            spec.get("priority"),
+            "workspace_kind":      spec.get("workspace_kind") or "scratch",
+            "workspace_path":      spec.get("workspace_path"),
+            "triage":              spec.get("triage"),
+            "idempotency_key":     spec.get("idempotency_key"),
+            "max_runtime_seconds": spec.get("max_runtime_seconds"),
+            "skills":              spec.get("skills"),
+            "goal_mode":           spec.get("goal_mode"),
+            "goal_max_turns":      spec.get("goal_max_turns"),
+            "depends_on":          depends_on,
+        })
+
+    if not kept:
+        return tool_error("plan would be empty after modifications — use kanban_plan_approve or let it expire instead")
+
+    # --- validate the resulting graph ---
+    try:
+        _topo_sort(len(kept), [t["depends_on"] for t in kept])
+    except ValueError as e:
+        return tool_error(str(e))
+
+    # --- commit back to store, reset TTL ---
+    with _plan_lock:
+        if str(plan_id) not in _plan_store:
+            return tool_error(
+                f"plan {plan_id!r} was concurrently approved or expired — stage a new plan."
+            )
+        _plan_store[str(plan_id)]["tasks"] = kept
+        _plan_store[str(plan_id)]["created_at"] = time.time()
+
+    return _ok(plan_id=plan_id, task_count=len(kept), preview=_plan_summary(plan_id, kept))
+
+
+KANBAN_PLAN_MODIFY_SCHEMA = {
+    "name": "kanban_plan_modify",
+    "description": (
+        "Patch a staged decomposition plan without approving it. "
+        "Supports three non-exclusive operations in one call: "
+        "field updates to existing tasks (by index), removal of tasks, "
+        "and appending new tasks. "
+        "Removed tasks are dropped from depends_on edges of remaining tasks. "
+        "Resets the plan TTL. Returns the updated plan summary."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "plan_id": {
+                "type": "string",
+                "description": "The plan_id returned by kanban_plan_preview.",
+            },
+            "updates": {
+                "type": "object",
+                "description": (
+                    "Partial field overrides keyed by string task index. "
+                    'E.g. {"0": {"assignee": "coder"}, "2": {"title": "Revised title"}}. '
+                    "Only the specified fields are changed; the rest are preserved."
+                ),
+                "additionalProperties": {
+                    "type": "object",
+                    "description": "Subset of task fields to overwrite.",
+                },
+            },
+            "remove": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "description": (
+                    "Indices of tasks to drop. Any depends_on references to "
+                    "removed tasks are silently pruned from remaining tasks; "
+                    "other indices are renumbered accordingly."
+                ),
+            },
+            "add": {
+                "type": "array",
+                "description": "New task specs to append after existing tasks.",
+                "items": {
+                    "type": "object",
+                    "required": ["title", "assignee"],
+                    "properties": {
+                        "title":    {"type": "string"},
+                        "assignee": {"type": "string"},
+                        "body":     {"type": "string"},
+                        "depends_on": {
+                            "type": "array",
+                            "items": {"type": "integer"},
+                            "description": (
+                                "Indices in the post-modification task list "
+                                "(after removals, before other additions in this call)."
+                            ),
+                        },
+                        "parents":             {"type": "array", "items": {"type": "string"}},
+                        "priority":            {"type": "integer"},
+                        "workspace_kind":      {"type": "string", "enum": ["scratch", "dir", "worktree"]},
+                        "workspace_path":      {"type": "string"},
+                        "triage":              {"type": "boolean"},
+                        "idempotency_key":     {"type": "string"},
+                        "max_runtime_seconds": {"type": "integer"},
+                        "skills":              {"type": "array", "items": {"type": "string"}},
+                        "goal_mode":           {"type": "boolean"},
+                        "goal_max_turns":      {"type": "integer"},
+                    },
+                },
+            },
+        },
+        "required": ["plan_id"],
+    },
+}
 
 
 def _handle_plan_approve(args: dict, **kw) -> str:
@@ -1789,6 +1997,15 @@ registry.register(
     handler=_handle_link,
     check_fn=_check_kanban_mode,
     emoji="🔗",
+)
+
+registry.register(
+    name="kanban_plan_modify",
+    toolset="kanban",
+    schema=KANBAN_PLAN_MODIFY_SCHEMA,
+    handler=_handle_plan_modify,
+    check_fn=_check_kanban_orchestrator_mode,
+    emoji="✏️",
 )
 
 registry.register(
