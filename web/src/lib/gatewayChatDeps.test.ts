@@ -10,11 +10,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const getSessions = vi.fn();
 const getSessionMessages = vi.fn();
+const getProfiles = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   api: {
     getSessions: (...a: unknown[]) => getSessions(...a),
     getSessionMessages: (...a: unknown[]) => getSessionMessages(...a),
+    getProfiles: (...a: unknown[]) => getProfiles(...a),
   },
 }));
 

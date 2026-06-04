@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m json.tool)",
+      "Bash(find ~/.hermes/design-language/src -type f | sort)",
+      "Bash(cat ~/.hermes/design-language/dist/hooks/use-below-breakpoint.d.ts)",
+      "Bash(ls ~/.hermes/design-language/dist/hooks/ && cat ~/.hermes/design-language/dist/index.js | head -5)",
+      "mcp__Claude_Preview__preview_start",
+      "Read(//Users/evan/.hermes/kanban/**)",
+      "Read(//Users/evan/.hermes/**)",
+      "Bash(scripts/run_tests.sh tests/tools/test_kanban_tools.py)"
+    ]
+  }
+}

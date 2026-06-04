@@ -1724,7 +1724,7 @@ def _session_info(agent, session: dict | None = None) -> dict:
         "update_behind": None,
         "update_command": "",
         "usage": _get_usage(agent),
-        "profile_name": _current_profile_name(),
+        "profile_name": (session or {}).get("profile") or _current_profile_name(),
     }
     try:
         from hermes_cli import __version__, __release_date__
@@ -2926,6 +2926,7 @@ def _(rid, params: dict) -> dict:
 
     ready = threading.Event()
     now = time.time()
+    session_profile = str(params.get("profile") or "").strip() or None
 
     with _sessions_lock:
         _sessions[sid] = {
@@ -2945,6 +2946,7 @@ def _(rid, params: dict) -> dict:
             "inflight_turn": None,
             "last_active": now,
             "pending_title": title or None,
+            "profile": session_profile,
             "running": False,
             "session_key": key,
             "show_reasoning": _load_show_reasoning(),
@@ -2989,7 +2991,7 @@ def _(rid, params: dict) -> dict:
                 "branch": _git_branch_for_cwd(_sessions[sid]["cwd"]),
                 "lazy": True,
                 "desktop_contract": DESKTOP_BACKEND_CONTRACT,
-                "profile_name": _current_profile_name(),
+                "profile_name": session_profile or _current_profile_name(),
             },
         },
     )

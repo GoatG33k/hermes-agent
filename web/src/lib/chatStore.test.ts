@@ -54,6 +54,12 @@ function makeFakeBackend(initial: ChatSession[] = []) {
       if (!sessions.has(id)) throw new Error("session not found");
       return [...(messages.get(id) ?? [])];
     },
+    async listProfiles() {
+      return [
+        { name: "default", is_default: true, model: "gpt-4", provider: "openai" },
+        { name: "coder", is_default: false, model: "claude-3", provider: "anthropic" },
+      ];
+    },
   };
 
   return {
