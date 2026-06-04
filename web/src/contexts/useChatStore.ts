@@ -26,6 +26,13 @@ export function useChatStore(): {
   if (!store) {
     throw new Error("useChatStore must be used within a ChatStoreProvider");
   }
-  const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
+  // The dashboard is a client-only SPA (createRoot, no SSR), but passing
+  // getServerSnapshot future-proofs against hydration mismatches if it ever
+  // gains server rendering — the store's snapshot is the same on both sides.
+  const state = useSyncExternalStore(
+    store.subscribe,
+    store.getSnapshot,
+    store.getSnapshot,
+  );
   return { state, store };
 }

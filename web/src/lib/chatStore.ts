@@ -367,6 +367,11 @@ export class ChatStore {
       await this.deps.deleteSession(id);
       const sessions = this.state.sessions.filter((s) => s.id !== id);
       const wasActive = this.state.activeSessionId === id;
+      if (wasActive) {
+        // Invalidate any in-flight loadActiveMessages so it can't commit a
+        // transcript for the session we just cleared.
+        this.loadToken++;
+      }
       this.setState({
         sessions,
         loading: false,
@@ -384,6 +389,11 @@ export class ChatStore {
   /** Select a session as active and load its messages. Pass null to clear. */
   async selectSession(id: string | null): Promise<void> {
     if (id === this.state.activeSessionId) return;
+    // Invalidate any in-flight load before switching, so a slow load for the
+    // previous session (or for null) can't commit after this change. When
+    // `id` is non-null, loadActiveMessages() below bumps the token again to
+    // its own value; clearing to null relies solely on this bump.
+    this.loadToken++;
     this.setState({ activeSessionId: id, messages: [] });
     this.persist();
     if (id) await this.loadActiveMessages();
@@ -457,15 +467,19 @@ export class ChatStore {
     this.persist();
   }
 
-  /** Toggle the open widget between minimized and expanded. */
+  /** Toggle the open widget between minimized and expanded. No-op when the
+   *  widget is closed (a closed widget can't be minimized). */
   toggleMinimized(): void {
+    if (!this.state.widgetOpen) return;
     this.setState({ minimized: !this.state.minimized });
     this.persist();
   }
 
-  /** Explicitly set the minimized flag. */
+  /** Explicitly set the minimized flag. Coerced to false while the widget is
+   *  closed so the `widgetOpen:false + minimized:true` invariant can't be
+   *  violated. */
   setMinimized(minimized: boolean): void {
-    this.setState({ minimized });
+    this.setState({ minimized: minimized && this.state.widgetOpen });
     this.persist();
   }
 

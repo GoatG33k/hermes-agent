@@ -293,6 +293,35 @@ describe("ChatStore — messages per session", () => {
     expect(state.messages).toEqual([{ role: "assistant", content: "FAST" }]);
     expect(state.loading).toBe(false);
   });
+
+  it("clearing the active session invalidates an in-flight load", async () => {
+    let resolveLoad!: (m: ChatMessage[]) => void;
+    const deps: ChatStoreDeps = {
+      async createSession() {
+        return { id: "s1" };
+      },
+      async listSessions() {
+        return [session("s1")];
+      },
+      async deleteSession() {},
+      loadMessages() {
+        return new Promise<ChatMessage[]>((r) => {
+          resolveLoad = r;
+        });
+      },
+    };
+    const store = new ChatStore(deps, makeMemoryPersistence());
+    await store.refreshSessions();
+
+    const load = store.selectSession("s1"); // load starts, hangs
+    await store.selectSession(null); // clear before it resolves
+    resolveLoad([{ role: "assistant", content: "STALE" }]); // now resolve
+    await load;
+
+    // The stale transcript must not have committed.
+    expect(store.getSnapshot().activeSessionId).toBeNull();
+    expect(store.getSnapshot().messages).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -406,7 +435,8 @@ describe("ChatStore — widget state", () => {
     });
   });
 
-  it("toggleMinimized flips and persists the flag", () => {
+  it("toggleMinimized flips and persists the flag (when open)", () => {
+    store.openWidget();
     expect(store.getSnapshot().minimized).toBe(false);
     store.toggleMinimized();
     expect(store.getSnapshot().minimized).toBe(true);
@@ -419,6 +449,16 @@ describe("ChatStore — widget state", () => {
     store.setMinimized(true);
     store.openWidget();
     expect(store.getSnapshot().minimized).toBe(false);
+  });
+
+  it("minimize controls are no-ops while the widget is closed", () => {
+    // Widget starts closed.
+    store.setMinimized(true);
+    expect(store.getSnapshot().minimized).toBe(false);
+    store.toggleMinimized();
+    expect(store.getSnapshot().minimized).toBe(false);
+    // The persisted slot never holds the inconsistent combo.
+    expect(persistence.snapshot()?.minimized ?? false).toBe(false);
   });
 });
 
