@@ -704,5 +704,19 @@ export interface Translations {
     workspacePathOptional: string;
     logTruncated: string;
     logAt: string;
+    // Task drawer: Related-To section, run-grouped activity timeline, and the
+    // live-run steering panel. Optional so locales not yet translated fall back
+    // to the English default passed at each call site (tx(key, default)).
+    relatedTo?: string;
+    addParentSearch?: string;
+    addChildSearch?: string;
+    activity?: string;
+    noActivity?: string;
+    liveRun?: string;
+    streaming?: string;
+    connecting?: string;
+    waitingForOutput?: string;
+    steerPlaceholder?: string;
+    steerSend?: string;
   };
 }

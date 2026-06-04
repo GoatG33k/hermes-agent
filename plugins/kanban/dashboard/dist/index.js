@@ -2237,10 +2237,10 @@
         className: "hermes-kanban-combo-dropdown",
         style: { top: dropPos.top, left: dropPos.left, width: dropPos.width },
       },
-        h("div", {
+        props.emptyLabel === null ? null : h("div", {
           className: "hermes-kanban-combo-item hermes-kanban-combo-item--empty",
           onMouseDown: function (e) { e.preventDefault(); pick(null); },
-        }, "— no parent —"),
+        }, props.emptyLabel || "— no parent —"),
         filtered.length === 0
           ? h("div", { className: "hermes-kanban-combo-empty" }, "No tasks match")
           : filtered.map(function (task) {
@@ -3730,6 +3730,8 @@
     const events = props.data.events || [];
     const attachments = props.data.attachments || [];
     const links = props.data.links || { parents: [], children: [] };
+    // A run that hasn't ended yet — drives the live console + steer panel.
+    const activeRun = (props.data.runs || []).find(function (r) { return !r.ended_at; });
 
     return h("div", { className: "hermes-kanban-drawer-body" },
       h("div", { className: "hermes-kanban-drawer-title" },
@@ -3813,193 +3815,436 @@
         uploadErr: props.uploadErr,
         i18n: i18n,
       }),
-      h("div", { className: "hermes-kanban-section" },
-        h("div", { className: "hermes-kanban-section-head" },
-          `${tx(i18n, "comments", "Comments")} (${comments.length})`),
-        comments.length === 0
-          ? h("div", { className: "text-xs text-muted-foreground" },
-              tx(i18n, "noComments", "— no comments —"))
-          : comments.map(function (c) {
-              return h("div", { key: c.id, className: "hermes-kanban-comment" },
-                h("div", { className: "hermes-kanban-comment-head" },
-                  h("span", { className: "hermes-kanban-comment-author" }, c.author || "anon"),
-                  h("span", { className: "hermes-kanban-comment-ago" },
-                    timeAgo ? timeAgo(c.created_at) : ""),
-                ),
-                h(MarkdownBlock, { source: c.body, enabled: props.renderMarkdown }),
-              );
-            }),
-      ),
-      h("div", { className: "hermes-kanban-section" },
-        h("div", { className: "hermes-kanban-section-head" },
-          `${tx(i18n, "events", "Events")} (${events.length})`),
-        events.slice().reverse().slice(0, 20).map(function (e) {
-          const isDiag = isDiagnosticEvent(e.kind);
-          const phantoms = isDiag ? phantomIdsFromEvent(e) : [];
-          return h("div", {
-            key: e.id,
-            className: cn(
-              "hermes-kanban-event",
-              isDiag ? "hermes-kanban-event--hallucination" : "",
-            ),
-          },
-            isDiag
-              ? h("div", { className: "hermes-kanban-event-header" },
-                  h("span", { className: "hermes-kanban-event-warning-icon" }, "⚠"),
-                  h("span", { className: "hermes-kanban-event-warning-label" },
-                    getDiagnosticEventLabel(i18n, e.kind) || e.kind),
-                  h("span", { className: "hermes-kanban-event-ago" },
-                    timeAgo ? timeAgo(e.created_at) : ""),
-                )
-              : h("div", { className: "hermes-kanban-event-header-plain" },
-                  h("span", { className: "hermes-kanban-event-kind" }, e.kind),
-                  h("span", { className: "hermes-kanban-event-ago" },
-                    timeAgo ? timeAgo(e.created_at) : ""),
-                ),
-            isDiag && phantoms.length > 0
-              ? h("div", { className: "hermes-kanban-event-phantom-row" },
-                  h("span", { className: "hermes-kanban-event-phantom-label" },
-                    tx(i18n, "phantomIds", "Phantom ids:")),
-                  phantoms.map(function (pid) {
-                    return h("code", {
-                      key: pid,
-                      className: "hermes-kanban-event-phantom-chip",
-                    }, pid);
-                  }),
-                )
-              : null,
-            e.payload && !isDiag
-              ? h("code", { className: "hermes-kanban-event-payload" },
-                  JSON.stringify(e.payload))
-              : null,
-          );
-        }),
-      ),
-      h(WorkerLogSection, { taskId: t.id, boardSlug: props.boardSlug }),
-      h(RunHistorySection, { runs: props.data.runs || [] }),
-    );
-  }
-
-  // Per-attempt history. Closed runs first (most recent last), then the
-  // active run if any. Each row shows profile / outcome / elapsed /
-  // summary. Collapsed by default when there are more than three runs.
-  function RunHistorySection(props) {
-    const { t } = useI18n();
-    const runs = props.runs || [];
-    const [expanded, setExpanded] = useState(false);
-    if (runs.length === 0) return null;
-    const showAll = expanded || runs.length <= 3;
-    const visible = showAll ? runs : runs.slice(-3);
-
-    const fmtElapsed = function (run) {
-      if (!run || !run.started_at) return "";
-      const end = run.ended_at || Math.floor(Date.now() / 1000);
-      const secs = Math.max(0, end - run.started_at);
-      if (secs < 60) return `${secs}s`;
-      if (secs < 3600) return `${Math.round(secs / 60)}m`;
-      return `${(secs / 3600).toFixed(1)}h`;
-    };
-
-    return h("div", { className: "hermes-kanban-section" },
-      h("div", { className: "hermes-kanban-section-head-row" },
-        h("span", { className: "hermes-kanban-section-head" },
-          `${tx(t, "runHistory", "Run history")} (${runs.length})`),
-        !showAll
-          ? h("button", {
-              type: "button",
-              onClick: function () { setExpanded(true); },
-              className: "hermes-kanban-edit-link",
-              title: tx(t, "showAllAttempts", "Show all attempts"),
-            }, `+${runs.length - 3} earlier`)
-          : null,
-      ),
-      visible.map(function (r) {
-        const outcomeClass = r.ended_at
-          ? `hermes-kanban-run--${r.outcome || r.status || "ended"}`
-          : "hermes-kanban-run--active";
-        return h("div", { key: r.id, className: cn("hermes-kanban-run", outcomeClass) },
-          h("div", { className: "hermes-kanban-run-head" },
-            h("span", { className: "hermes-kanban-run-outcome" },
-              r.ended_at ? (r.outcome || r.status || tx(t, "ended", "ended")) : tx(t, "active", "active")),
-            h("span", { className: "hermes-kanban-run-profile" },
-              r.profile ? `@${r.profile}` : tx(t, "noProfile", "(no profile)")),
-            h("span", { className: "hermes-kanban-run-elapsed" }, fmtElapsed(r)),
-            h("span", { className: "hermes-kanban-run-ago" },
-              timeAgo ? timeAgo(r.started_at) : ""),
-          ),
-          r.summary
-            ? h("div", { className: "hermes-kanban-run-summary" }, r.summary)
-            : null,
-          r.error
-            ? h("div", { className: "hermes-kanban-run-error" }, r.error)
-            : null,
-          (r.metadata && Object.keys(r.metadata).length > 0)
-            ? (function () {
-                var json = JSON.stringify(r.metadata, null, 2);
-                var collapsed = json.length > 300;
-                return h("details", {
-                    className: "hermes-kanban-run-meta-block",
-                    open: !collapsed,
-                  },
-                  h("summary", { className: "hermes-kanban-run-meta-label" }, "Metadata"),
-                  h("code", { className: "hermes-kanban-run-meta" }, json),
-                );
-              })()
-            : null,
-        );
+      activeRun
+        ? h(LiveRunPanel, {
+            taskId: t.id,
+            runId: activeRun.id,
+            boardSlug: props.boardSlug,
+            onSteered: props.onRefresh,
+          })
+        : null,
+      h(ActivityTimeline, {
+        comments: comments,
+        events: events,
+        runs: props.data.runs || [],
+        taskId: t.id,
+        boardSlug: props.boardSlug,
+        renderMarkdown: props.renderMarkdown,
       }),
     );
   }
 
-  // Worker log: loads lazily (one GET on mount), refresh button, tail cap.
-  function WorkerLogSection(props) {
-    const { t } = useI18n();
+  // ---- Activity timeline -------------------------------------------------
+  //
+  // One chronological history replacing the old separate Comments / Events /
+  // Worker-log / Run-history sections. Runs (invocations) are the backbone:
+  // each is a card grouping its comments, notable events, a heartbeat count,
+  // summary/error and a lazily-loaded per-run log. Items with no run_id
+  // (human comments, pre/inter-run lifecycle events) render as loose rows
+  // interleaved by time.
+
+  // Within-run lifecycle/liveness noise we don't surface as individual rows:
+  // heartbeats collapse to a count, claim/spawn/promote are implied by the
+  // run card, and `commented` duplicates the comment we already render.
+  const TL_SUPPRESSED_EVENTS = {
+    heartbeat: 1, commented: 1, claimed: 1, spawned: 1,
+    promoted: 1, claim_extended: 1,
+  };
+
+  // A run's terminal outcome (blocked/completed/crashed/…) is already conveyed
+  // by the run card's header + summary/error, so we drop the duplicate event
+  // row *inside* a run. Loose outcome events (run_id null) still render.
+  const TL_RUN_OUTCOME_EVENTS = {
+    blocked: 1, completed: 1, crashed: 1, timed_out: 1,
+    gave_up: 1, spawn_failed: 1, reclaimed: 1, released: 1, status: 1,
+  };
+
+  function fmtRunElapsed(run) {
+    if (!run || !run.started_at) return "";
+    const end = run.ended_at || Math.floor(Date.now() / 1000);
+    const secs = Math.max(0, end - run.started_at);
+    if (secs < 60) return `${secs}s`;
+    if (secs < 3600) return `${Math.round(secs / 60)}m`;
+    return `${(secs / 3600).toFixed(1)}h`;
+  }
+
+  function tlShortId(id) {
+    return typeof id === "string" ? id.slice(0, 8) : String(id);
+  }
+
+  // Turn a raw event into a short label + detail instead of dumping
+  // JSON.stringify(payload) at the user.
+  function humanizeEvent(e) {
+    const p = e.payload || {};
+    switch (e.kind) {
+      case "created":    return { label: "created", detail: p.from_decompose_of ? "from decompose" : (p.assignee ? "→ @" + p.assignee : "") };
+      case "assigned":   return { label: "assigned", detail: p.assignee ? "→ @" + p.assignee : "" };
+      case "linked":     return { label: "linked", detail: (p.parent && p.child) ? tlShortId(p.parent) + " → " + tlShortId(p.child) : "" };
+      case "decomposed": return { label: "decomposed", detail: (p.child_ids && p.child_ids.length) ? p.child_ids.length + " children" : "" };
+      case "promoted":   return { label: "promoted", detail: "" };
+      case "spawned":    return { label: "spawned", detail: p.pid ? "pid " + p.pid : "" };
+      case "claimed":    return { label: "claimed", detail: p.run_id ? "run #" + p.run_id : "" };
+      case "blocked":    return { label: "blocked", detail: p.reason || "" };
+      case "unblocked":  return { label: "unblocked", detail: "" };
+      case "completed":  return { label: "completed", detail: p.summary ? String(p.summary).slice(0, 140) : "" };
+      case "crashed":    return { label: "crashed", detail: p.reason || p.error || "" };
+      case "timed_out":  return { label: "timed out", detail: "" };
+      case "status":     return { label: "status", detail: p.status ? "→ " + p.status : "" };
+      case "archived":   return { label: "archived", detail: "" };
+      case "specified":  return { label: "specified", detail: "" };
+      case "respawn_guarded": return { label: "respawn guarded", detail: p.reason || "" };
+      default:           return { label: e.kind, detail: "" };
+    }
+  }
+
+  // Detect the structured review/handoff blob workers post as a comment so we
+  // can render it as a card instead of a wall of JSON. Returns null for plain
+  // comments (rendered as markdown).
+  function parseHandoff(body) {
+    if (!body) return null;
+    const start = body.indexOf("{");
+    const end = body.lastIndexOf("}");
+    if (start < 0 || end <= start) return null;
+    let obj;
+    try { obj = JSON.parse(body.slice(start, end + 1)); }
+    catch (e) { return null; }
+    if (!obj || typeof obj !== "object") return null;
+    const known = ["pr_number", "pr_url", "changed_files", "decisions", "stats", "branch", "repo"];
+    if (!known.some(function (k) { return k in obj; })) return null;
+    const prefix = body.slice(0, start).replace(/```(json)?\s*$/i, "").trim();
+    return { obj: obj, prefix: prefix };
+  }
+
+  function HandoffCard(props) {
+    const obj = props.obj;
+    const [showFiles, setShowFiles] = useState(false);
+    const files = Array.isArray(obj.changed_files) ? obj.changed_files : [];
+    const decisions = Array.isArray(obj.decisions) ? obj.decisions : [];
+    const row = function (label, value) {
+      return value ? h("div", { className: "hermes-kanban-handoff-row" },
+        h("span", { className: "hermes-kanban-handoff-key" }, label),
+        h("span", { className: "hermes-kanban-handoff-val" }, String(value))) : null;
+    };
+    return h("div", { className: "hermes-kanban-handoff" },
+      props.prefix ? h("div", { className: "hermes-kanban-handoff-title" }, props.prefix) : null,
+      obj.pr_url
+        ? h("a", {
+            className: "hermes-kanban-handoff-pr", href: obj.pr_url,
+            target: "_blank", rel: "noreferrer",
+          }, obj.pr_number ? ("PR #" + obj.pr_number) : obj.pr_url)
+        : (obj.pr_number ? row("PR", "#" + obj.pr_number) : null),
+      row("Repo", obj.repo),
+      row("Branch", obj.branch),
+      row("Stats", obj.stats),
+      files.length > 0
+        ? h("div", { className: "hermes-kanban-handoff-files" },
+            h("button", {
+              type: "button", className: "hermes-kanban-edit-link",
+              onClick: function () { setShowFiles(!showFiles); },
+            }, (showFiles ? "▾ " : "▸ ") + files.length + " changed file" + (files.length === 1 ? "" : "s")),
+            showFiles
+              ? h("ul", { className: "hermes-kanban-handoff-filelist" },
+                  files.map(function (f, i) { return h("li", { key: i }, String(f)); }))
+              : null)
+        : null,
+      decisions.length > 0
+        ? h("ul", { className: "hermes-kanban-handoff-decisions" },
+            decisions.map(function (d, i) { return h("li", { key: i }, String(d)); }))
+        : null,
+    );
+  }
+
+  function CommentItem(props) {
+    const c = props.comment;
+    const handoff = parseHandoff(c.body);
+    return h("div", { className: "hermes-kanban-comment" },
+      h("div", { className: "hermes-kanban-comment-head" },
+        h("span", { className: "hermes-kanban-comment-author" }, c.author || "anon"),
+        h("span", { className: "hermes-kanban-comment-ago" }, timeAgo ? timeAgo(c.created_at) : "")),
+      handoff
+        ? h(HandoffCard, { obj: handoff.obj, prefix: handoff.prefix })
+        : h(MarkdownBlock, { source: c.body, enabled: props.renderMarkdown }),
+    );
+  }
+
+  function EventRow(props) {
+    const e = props.event;
+    if (isDiagnosticEvent(e.kind)) {
+      const phantoms = phantomIdsFromEvent(e);
+      return h("div", { className: "hermes-kanban-event hermes-kanban-event--hallucination" },
+        h("div", { className: "hermes-kanban-event-header" },
+          h("span", { className: "hermes-kanban-event-warning-icon" }, "⚠"),
+          h("span", { className: "hermes-kanban-event-warning-label" },
+            getDiagnosticEventLabel(props.i18n, e.kind) || e.kind),
+          h("span", { className: "hermes-kanban-event-ago" }, timeAgo ? timeAgo(e.created_at) : "")),
+        phantoms.length > 0
+          ? h("div", { className: "hermes-kanban-event-phantom-row" },
+              h("span", { className: "hermes-kanban-event-phantom-label" }, "Phantom ids:"),
+              phantoms.map(function (pid) {
+                return h("code", { key: pid, className: "hermes-kanban-event-phantom-chip" }, pid);
+              }))
+          : null,
+      );
+    }
+    const hum = humanizeEvent(e);
+    return h("div", { className: cn("hermes-kanban-tl-event", props.loose ? "hermes-kanban-tl-event--loose" : "") },
+      h("span", { className: "hermes-kanban-tl-event-kind" }, hum.label),
+      hum.detail ? h("span", { className: "hermes-kanban-tl-event-detail" }, hum.detail) : null,
+      h("span", { className: "hermes-kanban-tl-event-ago" }, timeAgo ? timeAgo(e.created_at) : ""),
+    );
+  }
+
+  function RunCard(props) {
+    const r = props.run;
+    const items = props.items || [];
+    const outcomeClass = r.ended_at
+      ? `hermes-kanban-run--${r.outcome || r.status || "ended"}`
+      : "hermes-kanban-run--active";
+    return h("div", { className: cn("hermes-kanban-run", outcomeClass) },
+      h("div", { className: "hermes-kanban-run-head" },
+        h("span", { className: "hermes-kanban-run-attempt" }, `Run ${props.attempt}`),
+        h("span", { className: "hermes-kanban-run-outcome" },
+          r.ended_at ? (r.outcome || r.status || "ended") : "active"),
+        h("span", { className: "hermes-kanban-run-profile" }, r.profile ? `@${r.profile}` : "(no profile)"),
+        h("span", { className: "hermes-kanban-run-elapsed" }, fmtRunElapsed(r)),
+        h("span", { className: "hermes-kanban-run-ago" }, timeAgo ? timeAgo(r.started_at) : ""),
+      ),
+      r.summary ? h("div", { className: "hermes-kanban-run-summary" }, r.summary) : null,
+      items.length > 0
+        ? h("div", { className: "hermes-kanban-run-body" },
+            items.map(function (it) {
+              return it.kind === "comment"
+                ? h(CommentItem, { key: "c" + it.data.id, comment: it.data, renderMarkdown: props.renderMarkdown })
+                : h(EventRow, { key: "e" + it.data.id, event: it.data, i18n: props.i18n });
+            }))
+        : null,
+      props.heartbeats > 0
+        ? h("div", { className: "hermes-kanban-run-hb" },
+            `⏱ ${props.heartbeats} heartbeat${props.heartbeats === 1 ? "" : "s"}`)
+        : null,
+      r.error ? h("div", { className: "hermes-kanban-run-error" }, r.error) : null,
+      h(RunLog, { taskId: props.taskId, runId: r.id, boardSlug: props.boardSlug }),
+    );
+  }
+
+  function ActivityTimeline(props) {
+    const { t: i18n } = useI18n();
+    const comments = props.comments || [];
+    const events = props.events || [];
+    const runs = (props.runs || []).slice().sort(function (a, b) {
+      return (a.started_at || 0) - (b.started_at || 0);
+    });
+
+    const runIds = {};
+    const attemptOf = {};
+    runs.forEach(function (r, idx) { runIds[r.id] = true; attemptOf[r.id] = idx + 1; });
+
+    const commentsByRun = {};
+    const looseComments = [];
+    comments.forEach(function (c) {
+      if (c.run_id != null && runIds[c.run_id]) {
+        (commentsByRun[c.run_id] = commentsByRun[c.run_id] || []).push(c);
+      } else {
+        looseComments.push(c);
+      }
+    });
+
+    const eventsByRun = {};
+    const looseEvents = [];
+    const hbByRun = {};
+    events.forEach(function (e) {
+      const rid = (e.run_id != null && runIds[e.run_id]) ? e.run_id : null;
+      if (e.kind === "heartbeat") {
+        if (rid != null) hbByRun[rid] = (hbByRun[rid] || 0) + 1;
+        return;
+      }
+      if (rid != null) {
+        if (TL_SUPPRESSED_EVENTS[e.kind] || TL_RUN_OUTCOME_EVENTS[e.kind]) return;
+        (eventsByRun[rid] = eventsByRun[rid] || []).push(e);
+      } else if (e.kind !== "commented") {
+        looseEvents.push(e);
+      }
+    });
+
+    const blocks = [];
+    runs.forEach(function (r) {
+      const items = [];
+      (commentsByRun[r.id] || []).forEach(function (c) { items.push({ kind: "comment", data: c, at: c.created_at || 0 }); });
+      (eventsByRun[r.id] || []).forEach(function (e) { items.push({ kind: "event", data: e, at: e.created_at || 0 }); });
+      items.sort(function (a, b) { return a.at - b.at; });
+      blocks.push({ type: "run", at: r.started_at || 0, run: r, items: items, heartbeats: hbByRun[r.id] || 0 });
+    });
+    looseComments.forEach(function (c) { blocks.push({ type: "comment", at: c.created_at || 0, data: c }); });
+    looseEvents.forEach(function (e) { blocks.push({ type: "event", at: e.created_at || 0, data: e }); });
+    blocks.sort(function (a, b) { return b.at - a.at; });
+
+    return h("div", { className: "hermes-kanban-section" },
+      h("div", { className: "hermes-kanban-section-head" }, tx(i18n, "activity", "Activity")),
+      blocks.length === 0
+        ? h("div", { className: "text-xs text-muted-foreground" }, tx(i18n, "noActivity", "— no activity yet —"))
+        : h("div", { className: "hermes-kanban-timeline" },
+            blocks.map(function (b) {
+              if (b.type === "run") {
+                return h(RunCard, {
+                  key: "r" + b.run.id, run: b.run, attempt: attemptOf[b.run.id],
+                  items: b.items, heartbeats: b.heartbeats,
+                  taskId: props.taskId, boardSlug: props.boardSlug,
+                  renderMarkdown: props.renderMarkdown, i18n: i18n,
+                });
+              }
+              if (b.type === "comment") {
+                return h(CommentItem, { key: "lc" + b.data.id, comment: b.data, renderMarkdown: props.renderMarkdown });
+              }
+              return h(EventRow, { key: "le" + b.data.id, event: b.data, i18n: i18n, loose: true });
+            })),
+      h(FullLog, { taskId: props.taskId, boardSlug: props.boardSlug }),
+    );
+  }
+
+  // A lazily-loaded log viewer. ``runId`` selects one invocation's log; omit
+  // it for the whole-task history. Collapsed until the user opens it, so the
+  // drawer doesn't fetch (potentially large) logs on every open.
+  function LogDisclosure(props) {
+    const [open, setOpen] = useState(false);
     const [state, setState] = useState({ loading: false, data: null, err: null });
     const load = useCallback(function () {
       setState({ loading: true, data: null, err: null });
-      SDK.fetchJSON(withBoard(`${API}/tasks/${encodeURIComponent(props.taskId)}/log?tail=100000`, props.boardSlug))
+      const runQ = props.runId != null ? `&run=${props.runId}` : "";
+      const url = `${API}/tasks/${encodeURIComponent(props.taskId)}/log?tail=100000${runQ}`;
+      SDK.fetchJSON(withBoard(url, props.boardSlug))
         .then(function (d) { setState({ loading: false, data: d, err: null }); })
         .catch(function (e) { setState({ loading: false, data: null, err: String(e.message || e) }); });
-    }, [props.taskId, props.boardSlug]);
+    }, [props.taskId, props.runId, props.boardSlug]);
 
-    // Auto-load when the section mounts; the user opened the drawer so the
-    // cost is one small HTTP round-trip.
-    useEffect(function () { load(); }, [load]);
+    const toggle = function () {
+      if (!open && !state.data && !state.loading) load();
+      setOpen(!open);
+    };
 
     const data = state.data;
-    let body;
-    if (state.loading) {
-      body = h("div", { className: "text-xs text-muted-foreground" },
-        tx(t, "loadingLog", "Loading log…"));
-    } else if (state.err) {
-      body = h("div", { className: "text-xs text-destructive" }, state.err);
-    } else if (!data || !data.exists) {
-      body = h("div", { className: "text-xs text-muted-foreground italic" },
-        tx(t, "noWorkerLog",
-          "— no worker log yet (task hasn't spawned or log was rotated away) —"));
-    } else {
-      body = h("pre", { className: "hermes-kanban-pre hermes-kanban-log" },
-        data.content || "(empty)");
+    const sizeLabel = data && data.size_bytes ? ` (${data.size_bytes} B)` : "";
+    let body = null;
+    if (open) {
+      if (state.loading) {
+        body = h("div", { className: "text-xs text-muted-foreground" }, "Loading…");
+      } else if (state.err) {
+        body = h("div", { className: "text-xs text-destructive" }, state.err);
+      } else if (!data || !data.exists) {
+        body = h("div", { className: "text-xs text-muted-foreground italic" }, props.emptyLabel || "— no log —");
+      } else {
+        body = h("pre", { className: "hermes-kanban-pre hermes-kanban-log" }, data.content || "(empty)");
+      }
     }
 
-    return h("div", { className: "hermes-kanban-section" },
-      h("div", { className: "hermes-kanban-section-head-row" },
-        h("span", { className: "hermes-kanban-section-head" },
-          tx(t, "workerLog", "Worker log") + (data && data.size_bytes ? ` (${data.size_bytes} B)` : "")),
-        h("button", {
-          type: "button",
-          onClick: load,
-          className: "hermes-kanban-edit-link",
-          title: "Refresh log",
-        }, "refresh"),
-      ),
+    return h("div", { className: cn("hermes-kanban-runlog", props.className) },
+      h("button", { type: "button", className: "hermes-kanban-runlog-toggle", onClick: toggle },
+        (open ? "▾ " : "▸ ") + (props.label || "Log") + sizeLabel),
       body,
-      data && data.truncated
-        ? h("div", { className: "text-xs text-muted-foreground" },
-            tx(t, "logTruncated", "(showing last 100 KB — full log at "),
-            data.path,
-            tx(t, "logAt", ")"))
-        : null,
+    );
+  }
+
+  // One run's log.
+  function RunLog(props) {
+    return h(LogDisclosure, {
+      taskId: props.taskId, runId: props.runId, boardSlug: props.boardSlug,
+      label: "Log", emptyLabel: "— no log for this run —",
+    });
+  }
+
+  // Whole-task log: the per-run files concatenated, falling back to the legacy
+  // single file for tasks that ran before logs were split per run. Lets the
+  // raw stream stay reachable without cluttering each run card.
+  function FullLog(props) {
+    return h(LogDisclosure, {
+      taskId: props.taskId, boardSlug: props.boardSlug,
+      className: "hermes-kanban-fulllog",
+      label: "Full worker log", emptyLabel: "— no worker log yet —",
+    });
+  }
+
+  // Live console for an in-flight run: streams the worker's output over a
+  // WebSocket (no manual refresh) and carries a steer box that posts a comment
+  // the running agent picks up mid-flight. Shown above the activity timeline
+  // only while a run is active.
+  function LiveRunPanel(props) {
+    const { t } = useI18n();
+    const [logText, setLogText] = useState("");
+    const [connected, setConnected] = useState(false);
+    const [steerText, setSteerText] = useState("");
+    const [busy, setBusy] = useState(false);
+    const preRef = useRef(null);
+
+    useEffect(function () {
+      const token = window.__HERMES_SESSION_TOKEN__ || "";
+      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const qs = new URLSearchParams({ run: String(props.runId), token: token });
+      if (props.boardSlug) qs.set("board", props.boardSlug);
+      const url = `${proto}//${window.location.host}${API}/tasks/${encodeURIComponent(props.taskId)}/log/stream?${qs}`;
+      let ws;
+      try { ws = new WebSocket(url); } catch (_e) { return undefined; }
+      ws.onopen = function () { setConnected(true); };
+      ws.onmessage = function (ev) {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (typeof msg.content === "string") {
+            setLogText(msg.content);
+          } else if (typeof msg.append === "string") {
+            setLogText(function (prev) { return prev + msg.append; });
+          }
+        } catch (_e) { /* ignore */ }
+      };
+      ws.onclose = function () { setConnected(false); };
+      return function () { try { ws.close(); } catch (_e) { /* ignore */ } };
+    }, [props.taskId, props.runId, props.boardSlug]);
+
+    // Keep the console pinned to the newest output.
+    useEffect(function () {
+      const el = preRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    }, [logText]);
+
+    const submitSteer = function () {
+      const body = steerText.trim();
+      if (!body || busy) return;
+      setBusy(true);
+      SDK.fetchJSON(withBoard(`${API}/tasks/${encodeURIComponent(props.taskId)}/comments`, props.boardSlug), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: body }),
+      }).then(function () {
+        setSteerText("");
+        setBusy(false);
+        if (props.onSteered) props.onSteered();
+      }).catch(function () { setBusy(false); });
+    };
+
+    return h("div", { className: "hermes-kanban-liverun" },
+      h("div", { className: "hermes-kanban-liverun-head" },
+        h("span", { className: "hermes-kanban-liverun-dot" }),
+        h("span", { className: "hermes-kanban-liverun-label" }, tx(t, "liveRun", "Live run")),
+        h("span", { className: "hermes-kanban-liverun-status" },
+          connected ? tx(t, "streaming", "streaming") : tx(t, "connecting", "connecting…")),
+      ),
+      h("pre", {
+        ref: preRef,
+        className: "hermes-kanban-pre hermes-kanban-log hermes-kanban-liverun-log",
+      }, logText || tx(t, "waitingForOutput", "(waiting for output…)")),
+      h("div", { className: "hermes-kanban-liverun-steer" },
+        h("input", {
+          type: "text",
+          value: steerText,
+          placeholder: tx(t, "steerPlaceholder", "Steer the running agent… (Enter to send)"),
+          onChange: function (e) { setSteerText(e.target.value); },
+          onKeyDown: function (e) { if (e.key === "Enter") { e.preventDefault(); submitSteer(); } },
+          className: "hermes-kanban-liverun-input",
+          disabled: busy,
+        }),
+        h(Button, {
+          onClick: submitSteer,
+          disabled: busy || !steerText.trim(),
+          size: "sm",
+        }, tx(t, "steerSend", "Steer")),
+      ),
     );
   }
 
@@ -4150,9 +4395,7 @@
   function DependencyEditor(props) {
     const { t } = useI18n();
     const { task, links, allTasks } = props;
-    const [newParent, setNewParent] = useState("");
-    const [newChild, setNewChild] = useState("");
-    // Filter out self + existing links when offering the "add" dropdown.
+    // Filter out self + existing links when offering the "add" autocomplete.
     const candidatesFor = function (excludeSet) {
       return (allTasks || []).filter(function (tk) {
         return tk.id !== task.id && !excludeSet.has(tk.id);
@@ -4161,83 +4404,65 @@
     const parentExclude = new Set([task.id, ...(links.parents || [])]);
     const childExclude  = new Set([task.id, ...(links.children || [])]);
 
+    // A related task is meaningless to a human as a bare id; resolve to the
+    // title (falling back to the id when the task isn't in the loaded set).
+    const titleFor = function (id) {
+      const tk = (allTasks || []).find(function (x) { return x.id === id; });
+      return tk && tk.title ? tk.title : id;
+    };
+
+    const chip = function (id, onRemove) {
+      const title = titleFor(id);
+      return h("span", {
+        key: id,
+        className: "hermes-kanban-dep-chip",
+        title: title === id ? id : `${title} (${id})`,
+      },
+        h("span", { className: "hermes-kanban-dep-chip-title" }, title),
+        h("span", { className: "hermes-kanban-dep-chip-id" }, id.slice(0, 8)),
+        h("button", {
+          type: "button",
+          className: "hermes-kanban-dep-chip-x",
+          onClick: function () { onRemove(id); },
+          title: tx(t, "removeDependency", "Remove"),
+        }, "×"),
+      );
+    };
+
+    const field = function (label, ids, onRemove, candidates, onAdd, addPlaceholder) {
+      return h("div", { className: "hermes-kanban-deps-field" },
+        h("div", { className: "hermes-kanban-deps-label" }, label),
+        ids.length > 0
+          ? h("div", { className: "hermes-kanban-deps-chips" },
+              ids.map(function (id) { return chip(id, onRemove); }))
+          : null,
+        h(TaskSearchSelect, {
+          value: "",
+          onChange: function (id) { if (id) onAdd(id); },
+          tasks: candidates,
+          placeholder: addPlaceholder,
+          emptyLabel: null,
+        }),
+      );
+    };
+
     return h("div", { className: "hermes-kanban-section" },
-      h("div", { className: "hermes-kanban-section-head" }, tx(t, "dependencies", "Dependencies")),
-      h("div", { className: "hermes-kanban-deps-row" },
-        h("span", { className: "hermes-kanban-deps-label" }, tx(t, "parents", "Parents:")),
-        h("div", { className: "hermes-kanban-deps-chips" },
-          (links.parents || []).length === 0
-            ? h("span", { className: "hermes-kanban-deps-empty" }, tx(t, "none", "none"))
-            : (links.parents || []).map(function (id) {
-                return h("span", { key: id, className: "hermes-kanban-dep-chip" },
-                  id,
-                  h("button", {
-                    type: "button",
-                    className: "hermes-kanban-dep-chip-x",
-                    onClick: function () { props.onRemoveParent(id); },
-                    title: tx(t, "removeDependency", "Remove dependency"),
-                  }, "×"),
-                );
-              }),
-        ),
+      h("div", { className: "hermes-kanban-section-head" }, tx(t, "relatedTo", "Related To")),
+      field(
+        tx(t, "parents", "Parents"),
+        links.parents || [],
+        props.onRemoveParent,
+        candidatesFor(parentExclude),
+        props.onAddParent,
+        tx(t, "addParentSearch", "Search to add a parent…"),
       ),
-      h("div", { className: "hermes-kanban-deps-row" },
-        h(Select, Object.assign({
-          value: newParent,
-          className: "h-7 text-xs flex-1",
-        }, selectChangeHandler(setNewParent)),
-          h(SelectOption, { value: "" }, tx(t, "addParent", "— add parent —")),
-          candidatesFor(parentExclude).map(function (tk) {
-            return h(SelectOption, { key: tk.id, value: tk.id },
-              `${tk.id} — ${(tk.title || "").slice(0, 50)}`);
-          }),
-        ),
-        h(Button, {
-          onClick: function () {
-            if (!newParent) return;
-            props.onAddParent(newParent).then(function () { setNewParent(""); });
-          },
-          disabled: !newParent,
-          size: "sm",
-        }, "+ parent"),
-      ),
-      h("div", { className: "hermes-kanban-deps-row" },
-        h("span", { className: "hermes-kanban-deps-label" }, tx(t, "children", "Children:")),
-        h("div", { className: "hermes-kanban-deps-chips" },
-          (links.children || []).length === 0
-            ? h("span", { className: "hermes-kanban-deps-empty" }, tx(t, "none", "none"))
-            : (links.children || []).map(function (id) {
-                return h("span", { key: id, className: "hermes-kanban-dep-chip" },
-                  id,
-                  h("button", {
-                    type: "button",
-                    className: "hermes-kanban-dep-chip-x",
-                    onClick: function () { props.onRemoveChild(id); },
-                    title: tx(t, "removeDependency", "Remove dependency"),
-                  }, "×"),
-                );
-              }),
-        ),
-      ),
-      h("div", { className: "hermes-kanban-deps-row" },
-        h(Select, Object.assign({
-          value: newChild,
-          className: "h-7 text-xs flex-1",
-        }, selectChangeHandler(setNewChild)),
-          h(SelectOption, { value: "" }, tx(t, "addChild", "— add child —")),
-          candidatesFor(childExclude).map(function (tk) {
-            return h(SelectOption, { key: tk.id, value: tk.id },
-              `${tk.id} — ${(tk.title || "").slice(0, 50)}`);
-          }),
-        ),
-        h(Button, {
-          onClick: function () {
-            if (!newChild) return;
-            props.onAddChild(newChild).then(function () { setNewChild(""); });
-          },
-          disabled: !newChild,
-          size: "sm",
-        }, "+ child"),
+      field(
+        tx(t, "children", "Children"),
+        links.children || [],
+        props.onRemoveChild,
+        candidatesFor(childExclude),
+        props.onAddChild,
+        tx(t, "addChildSearch", "Search to add a child…"),
       ),
     );
   }
@@ -4344,8 +4569,8 @@
       h("div", { className: "hermes-kanban-actions" },
         specifyButton,
         decomposeButton,
-        b("→ triage",  { status: "triage" },   task.status !== "triage"),
-        b("→ ready",   { status: "ready" },    task.status !== "ready"),
+        b("→ Triage",  { status: "triage" },   task.status !== "triage"),
+        b("→ Ready",   { status: "ready" },    task.status !== "ready"),
         // No direct → running button: /tasks/:id PATCH rejects status=running
         // with 400 (issue #19535). Tasks enter running only through the
         // dispatcher's claim_task path, which atomically creates the run row,

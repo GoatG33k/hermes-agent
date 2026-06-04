@@ -1735,3 +1735,166 @@ def test_board_param_in_all_schemas():
         assert "board" not in schema["parameters"].get("required", []), (
             f"{schema['name']} marks board as required; must be optional"
         )
+
+
+# ---------------------------------------------------------------------------
+# Comment → run attribution (invocations model)
+# ---------------------------------------------------------------------------
+
+def test_worker_comment_is_attributed_to_its_run(worker_env, monkeypatch):
+    """A worker commenting on its OWN task stamps the comment with its run id
+    so the dashboard can group that run's output together."""
+    from hermes_cli import kanban_db as kb
+
+    tid = worker_env
+    conn = kb.connect()
+    try:
+        run_id = kb.get_task(conn, tid).current_run_id
+    finally:
+        conn.close()
+    assert run_id is not None  # worker_env claims the task
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
+
+    from tools import kanban_tools as kt
+    out = kt._handle_comment({"task_id": tid, "body": "progress from this run"})
+    assert json.loads(out).get("ok") is True
+
+    conn = kb.connect()
+    try:
+        comments = kb.list_comments(conn, tid)
+    finally:
+        conn.close()
+    assert len(comments) == 1
+    assert comments[0].run_id == run_id
+
+
+def test_worker_comment_on_foreign_task_is_not_attributed(worker_env, monkeypatch):
+    """Cross-task handoff comments carry no run id: the worker's run belongs to
+    its own task, not the one it is commenting on."""
+    from hermes_cli import kanban_db as kb
+
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "999")
+    conn = kb.connect()
+    try:
+        other = kb.create_task(conn, title="sibling")
+    finally:
+        conn.close()
+
+    from tools import kanban_tools as kt
+    out = kt._handle_comment({"task_id": other, "body": "heads up before you start"})
+    assert json.loads(out).get("ok") is True
+
+    conn = kb.connect()
+    try:
+        comments = kb.list_comments(conn, other)
+    finally:
+        conn.close()
+    assert len(comments) == 1
+    assert comments[0].run_id is None
+
+
+# ---------------------------------------------------------------------------
+# Live steering: new operator comments injected into the running agent
+# ---------------------------------------------------------------------------
+
+class _SteerAgent:
+    """Minimal stand-in for AIAgent.steer() that records injected text."""
+
+    def __init__(self):
+        self.steers = []
+
+    def steer(self, text):
+        self.steers.append(text)
+        return True
+
+
+def test_steer_injects_new_operator_comment(worker_env, monkeypatch):
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    monkeypatch.setattr(kt, "_AUTO_STEER_MIN_INTERVAL_SECONDS", 0.0)
+    # Reset per-process steer state — the suite uses per-file (not per-test)
+    # isolation, so these module globals would otherwise leak between tests.
+    monkeypatch.setattr(kt, "_auto_steer_initialized", False)
+    monkeypatch.setattr(kt, "_auto_steer_seen_comment_id", 0)
+    tid = worker_env
+    agent = _SteerAgent()
+
+    conn = kb.connect()
+    try:
+        kb.add_comment(conn, tid, author="dashboard", body="initial spawn-context note")
+    finally:
+        conn.close()
+
+    # First poll watermarks past the spawn-time thread; nothing injected.
+    assert kt.inject_pending_comment_steers(agent) is False
+    assert agent.steers == []
+
+    conn = kb.connect()
+    try:
+        kb.add_comment(conn, tid, author="dashboard", body="actually, switch to approach B")
+    finally:
+        conn.close()
+
+    assert kt.inject_pending_comment_steers(agent) is True
+    assert len(agent.steers) == 1
+    assert "approach B" in agent.steers[0]
+    assert "dashboard" in agent.steers[0]
+
+    # Idempotent: a follow-up poll with no new comments injects nothing.
+    assert kt.inject_pending_comment_steers(agent) is False
+    assert len(agent.steers) == 1
+
+
+def test_steer_skips_workers_own_comment(worker_env, monkeypatch):
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    monkeypatch.setattr(kt, "_AUTO_STEER_MIN_INTERVAL_SECONDS", 0.0)
+    # Reset per-process steer state — the suite uses per-file (not per-test)
+    # isolation, so these module globals would otherwise leak between tests.
+    monkeypatch.setattr(kt, "_auto_steer_initialized", False)
+    monkeypatch.setattr(kt, "_auto_steer_seen_comment_id", 0)
+    tid = worker_env
+    agent = _SteerAgent()
+    assert kt.inject_pending_comment_steers(agent) is False  # init watermark
+
+    # The worker comments on its own task (author == HERMES_PROFILE).
+    conn = kb.connect()
+    try:
+        kb.add_comment(conn, tid, author="test-worker", body="note to self")
+    finally:
+        conn.close()
+    assert kt.inject_pending_comment_steers(agent) is False
+    assert agent.steers == []
+
+
+def test_steer_first_comment_on_empty_thread_is_injected(worker_env, monkeypatch):
+    """A task that starts with no comments must still inject the first operator
+    steer, not mistake it for pre-existing spawn context."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    monkeypatch.setattr(kt, "_AUTO_STEER_MIN_INTERVAL_SECONDS", 0.0)
+    # Reset per-process steer state — the suite uses per-file (not per-test)
+    # isolation, so these module globals would otherwise leak between tests.
+    monkeypatch.setattr(kt, "_auto_steer_initialized", False)
+    monkeypatch.setattr(kt, "_auto_steer_seen_comment_id", 0)
+    tid = worker_env
+    agent = _SteerAgent()
+    assert kt.inject_pending_comment_steers(agent) is False  # init on empty thread
+
+    conn = kb.connect()
+    try:
+        kb.add_comment(conn, tid, author="dashboard", body="first ever comment")
+    finally:
+        conn.close()
+    assert kt.inject_pending_comment_steers(agent) is True
+    assert "first ever comment" in agent.steers[0]
+
+
+def test_steer_noop_without_kanban_task(monkeypatch):
+    from tools import kanban_tools as kt
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    assert kt.inject_pending_comment_steers(_SteerAgent()) is False

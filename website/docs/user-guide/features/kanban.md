@@ -508,7 +508,10 @@ hermes dashboard        # "Kanban" tab appears in the nav, after "Skills"
   - **Editable description** — markdown-rendered by default (headings, bold, italic, inline code, fenced code, `http(s)` / `mailto:` links, bullet lists), with an "edit" button that swaps in a textarea. Markdown rendering is a tiny, XSS-safe renderer — every substitution runs on HTML-escaped input, only `http(s)` / `mailto:` links pass through, and `target="_blank"` + `rel="noopener noreferrer"` are always set.
   - **Dependency editor** — chip list of parents and children, each with an `×` to unlink, plus dropdowns over every other task to add a new parent or child. Cycle attempts are rejected server-side with a clear message.
   - **Status action row** (→ triage / → ready / → running / block / unblock / complete / archive) with confirm prompts for destructive transitions. For cards in the **Triage** column the row also exposes two LLM-driven actions: **⚗ Decompose** fans the task out into a graph of child tasks routed to specialist profiles by description (the orchestrator-driven path), and **✨ Specify** does a single-task spec rewrite. Decompose falls back to specify-style promotion when the LLM decides the task doesn't benefit from fan-out, so it's a strict superset. Both are reachable from the CLI (`hermes kanban decompose <id>` / `specify <id>` / `--all`), from any gateway platform (`/kanban decompose <id>`), and programmatically via `POST /api/plugins/kanban/tasks/:id/decompose` and `…/specify`. Configure the models under `auxiliary.kanban_decomposer` and `auxiliary.triage_specifier` in `config.yaml`.
-  - Result section (also markdown-rendered), comment thread with Enter-to-submit, the last 20 events.
+  - **Related To** — chip list of parents and children (showing task titles, not bare ids), each with an `×` to unlink, plus a searchable autocomplete to add a new parent or child. Cycle attempts are rejected server-side.
+  - Result section (also markdown-rendered).
+  - **Live-run panel** — when a worker is actively running, a pulsing **LIVE RUN** panel appears above the Activity section. It streams the worker's console output in real time (no manual refresh), and the input box at the bottom lets you steer the running agent mid-flight by posting a comment — the worker picks it up within seconds without being interrupted or restarted.
+  - **Activity timeline** — unified chronological history: runs (invocations) are the backbone, each grouping its worker comments (structured handoff blocks are rendered as cards instead of raw JSON), a collapsed heartbeat count, run summary/error, and a lazily-loaded per-run log toggle. Human comments, lifecycle events (created, assigned, linked, …), and out-of-run activity render as interleaved rows. Newest activity first.
 - **Toolbar filters** — free-text search, tenant dropdown (defaults to `dashboard.kanban.default_tenant` from `config.yaml`), assignee dropdown, "show archived" toggle, "lanes by profile" toggle, and a **Nudge dispatcher** button so you don't have to wait for the next 60 s tick.
 
 Visually the target is the familiar Linear / Fusion layout: dark theme, column headers with counts, coloured status dots, pill chips for priority and tenant. The plugin reads only theme CSS vars (`--color-*`, `--radius`, `--font-mono`, ...), so it reskins automatically with whichever dashboard theme is active.
@@ -677,7 +680,10 @@ hermes kanban dispatch [--dry-run] [--max N]           # one-shot pass
 hermes kanban daemon --force                           # DEPRECATED — standalone dispatcher (use `hermes gateway start` instead)
         [--failure-limit N] [--pidfile PATH] [-v]
 hermes kanban stats [--json]                           # per-status + per-assignee counts
-hermes kanban log <id> [--tail BYTES]                  # worker log from ~/.hermes/kanban/logs/
+hermes kanban log <id> [--tail BYTES]                  # worker log; concatenates all per-run files
+        #   (~/.hermes/kanban/logs/<id>.run<N>.log),
+        #   falling back to the legacy <id>.log for tasks
+        #   that ran before per-run log splitting was added
 hermes kanban notify-subscribe <id>                    # gateway bridge hook (used by /kanban in the gateway)
         --platform <name> --chat-id <id> [--thread-id <id>] [--user-id <id>]
 hermes kanban notify-list [<id>] [--json]

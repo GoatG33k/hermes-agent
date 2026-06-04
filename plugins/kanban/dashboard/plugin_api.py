@@ -185,6 +185,7 @@ def _comment_dict(c: kanban_db.Comment) -> dict[str, Any]:
         "author": c.author,
         "body": c.body,
         "created_at": c.created_at,
+        "run_id": c.run_id,
     }
 
 
@@ -1912,15 +1913,18 @@ def get_assignees(board: Optional[str] = Query(None)):
 def get_task_log(
     task_id: str,
     tail: Optional[int] = Query(None, ge=1, le=2_000_000),
+    run: Optional[int] = Query(None, ge=1),
     board: Optional[str] = Query(None),
 ):
     """Return the worker's stdout/stderr log.
 
-    ``tail`` caps the response size (bytes) so the dashboard drawer
-    doesn't paginate megabytes into the browser. Returns 404 if the task
-    has never spawned. The on-disk log is rotated at 2 MiB per
-    ``_rotate_worker_log`` — a single ``.log.1`` is kept, no further
-    generations, so disk usage per task is bounded at ~4 MiB.
+    With ``run`` set, returns just that invocation's log
+    (``<task_id>.run<run>.log``) so the dashboard timeline can show a single
+    attempt's output. Without it, returns the task's full history (every run
+    concatenated, falling back to the legacy single file). ``tail`` caps the
+    response size (bytes) so the drawer doesn't paginate megabytes into the
+    browser. Returns 404 if the task doesn't exist. On-disk logs are rotated at
+    2 MiB per ``_rotate_worker_log`` — a single ``.log.1`` is kept per file.
     """
     board = _resolve_board(board)
     conn = _conn(board=board)
@@ -1930,11 +1934,18 @@ def get_task_log(
         conn.close()
     if task is None:
         raise HTTPException(status_code=404, detail=f"task {task_id} not found")
-    content = kanban_db.read_worker_log(task_id, tail_bytes=tail, board=board)
-    log_path = kanban_db.worker_log_path(task_id, board=board)
+    content = kanban_db.read_worker_log(
+        task_id, run_id=run, tail_bytes=tail, board=board,
+    )
+    log_path = (
+        kanban_db.worker_run_log_path(task_id, run, board=board)
+        if run is not None
+        else kanban_db.worker_log_path(task_id, board=board)
+    )
     size = log_path.stat().st_size if log_path.exists() else 0
     return {
         "task_id": task_id,
+        "run": run,
         "path": str(log_path),
         "exists": content is not None,
         "size_bytes": size,
@@ -2095,6 +2106,13 @@ def switch_board(slug: str):
 # the simplest and most robust approach; it adds a fraction of a percent
 # of CPU and has no shared state to synchronize across workers.
 _EVENT_POLL_SECONDS = 0.3
+
+# Poll interval for the live worker-log tail (a per-run file the worker appends
+# to). 1s keeps the streamed console responsive without hammering the disk.
+_LOG_STREAM_POLL_SECONDS = 1.0
+# Initial backlog sent when a client connects mid-run, so the panel shows
+# recent output immediately without paging the whole (possibly large) file.
+_LOG_STREAM_INITIAL_TAIL_BYTES = 200_000
 
 
 # ---------------------------------------------------------------------------
@@ -2447,6 +2465,94 @@ async def stream_events(ws: WebSocket):
         return
     except Exception as exc:  # defensive: never crash the dashboard worker
         log.warning("Kanban event stream error: %s", exc)
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+
+@router.websocket("/tasks/{task_id}/log/stream")
+async def stream_task_log(ws: WebSocket, task_id: str):
+    """Stream a worker's live console output for the dashboard's live-run panel.
+
+    Sends an initial frame with the recent backlog, then pushes ``{append: …}``
+    frames as the worker appends to its per-run log file — so the panel updates
+    without the user re-fetching. ``run`` selects one invocation's file (the
+    active run); omit it for the whole-task log. Auth is the dashboard session
+    token via ``?token=`` (browsers can't set Authorization on a WS upgrade),
+    matching ``/events``.
+    """
+    token = ws.query_params.get("token")
+    if not _check_ws_token(token):
+        await ws.close(code=http_status.WS_1008_POLICY_VIOLATION)
+        return
+    await ws.accept()
+    try:
+        run_raw = ws.query_params.get("run")
+        try:
+            run_id = int(run_raw) if run_raw else None
+        except ValueError:
+            run_id = None
+        board_raw = ws.query_params.get("board")
+        try:
+            board = kanban_db._normalize_board_slug(board_raw) if board_raw else None
+        except ValueError:
+            board = None
+
+        path = (
+            kanban_db.worker_run_log_path(task_id, run_id, board=board)
+            if run_id is not None
+            else kanban_db.worker_log_path(task_id, board=board)
+        )
+
+        def _initial() -> tuple[str, int, bool]:
+            """Recent backlog (last N bytes) + the byte offset to stream from."""
+            try:
+                if not path.exists():
+                    return "", 0, False
+                size = path.stat().st_size
+                start = max(0, size - _LOG_STREAM_INITIAL_TAIL_BYTES)
+                with open(path, "rb") as f:
+                    f.seek(start)
+                    data = f.read()
+                return data.decode("utf-8", errors="replace"), size, True
+            except OSError:
+                return "", 0, False
+
+        def _read_since(offset: int) -> tuple[str, int]:
+            """New text appended past ``offset`` and the updated offset. Resets
+            to 0 if the file shrank (rotation/truncation) so we re-sync."""
+            try:
+                if not path.exists():
+                    return "", offset
+                size = path.stat().st_size
+                if size < offset:
+                    offset = 0
+                if size <= offset:
+                    return "", offset
+                with open(path, "rb") as f:
+                    f.seek(offset)
+                    data = f.read()
+                return data.decode("utf-8", errors="replace"), offset + len(data)
+            except OSError:
+                return "", offset
+
+        content, offset, exists = await asyncio.to_thread(_initial)
+        await ws.send_json({
+            "run": run_id, "exists": exists, "content": content, "offset": offset,
+        })
+
+        while True:
+            await asyncio.sleep(_LOG_STREAM_POLL_SECONDS)
+            text, offset = await asyncio.to_thread(_read_since, offset)
+            if text:
+                await ws.send_json({"append": text, "offset": offset})
+    except WebSocketDisconnect:
+        return
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:  # defensive: never crash the dashboard worker
+        log.warning("Kanban log stream error: %s", exc)
         try:
             await ws.close()
         except Exception:
