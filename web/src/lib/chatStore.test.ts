@@ -457,6 +457,15 @@ describe("ChatStore — persistence across refresh", () => {
     expect(state.activeSessionId).toBe("old-session");
     expect(state.messages).toEqual([{ role: "user", content: "hi" }]);
     expect(persistence.snapshot()?.activeSessionId).toBe("old-session");
+    // It must also appear in the sessions list (pointer/list consistency).
+    expect(state.sessions.some((s) => s.id === "old-session")).toBe(true);
+    expect(store.getActiveSession()?.id).toBe("old-session");
+
+    // A subsequent refresh that still doesn't include it must NOT drop it.
+    await store.refreshSessions();
+    expect(
+      store.getSnapshot().sessions.some((s) => s.id === "old-session"),
+    ).toBe(true);
   });
 
   it("does not duplicate message content into the persisted slot", async () => {

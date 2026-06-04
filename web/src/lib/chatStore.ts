@@ -318,6 +318,30 @@ export class ChatStore {
         if (!ok) {
           this.setState({ activeSessionId: null, messages: [], error: null });
           this.persist();
+        } else {
+          // Valid but beyond the listing page. Synthesize a minimal entry so
+          // the active session is present in `sessions` — keeping the
+          // activeSessionId pointer and the list consistent (and surviving
+          // later refreshes via refreshSessions' retain-active logic).
+          const now = Math.floor(Date.now() / 1000);
+          const id = this.state.activeSessionId;
+          if (id && !this.state.sessions.some((s) => s.id === id)) {
+            this.setState({
+              sessions: sortSessions([
+                ...this.state.sessions,
+                {
+                  id,
+                  title: null,
+                  profile: null,
+                  model: null,
+                  createdAt: now,
+                  lastActive: now,
+                  preview: null,
+                  messageCount: this.state.messages.length,
+                },
+              ]),
+            });
+          }
         }
       }
     }
@@ -347,6 +371,17 @@ export class ChatStore {
         }
         return s;
       });
+      // Retain the active session even if it's not in the fetched page. The
+      // listing is capped (DEFAULT_SESSIONS_PAGE_SIZE), so a valid active
+      // session can fall beyond page 1 (see hydrate's reconciliation). Dropping
+      // it here would desync the `activeSessionId` pointer from `sessions` —
+      // `getActiveSession()` would return null and a later refresh would evict
+      // it from the list. Carry over its previously-known entry.
+      const activeId = this.state.activeSessionId;
+      if (activeId && !merged.some((s) => s.id === activeId)) {
+        const prevActive = prevById.get(activeId);
+        if (prevActive) merged.push(prevActive);
+      }
       this.setState({ sessions: sortSessions(merged), loading: false });
       return true;
     } catch (e) {
