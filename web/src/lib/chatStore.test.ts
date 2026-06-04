@@ -494,6 +494,30 @@ describe("localStoragePersistence", () => {
     expect(localStoragePersistence(fakeStorage).read()).toBeNull();
   });
 
+  it("normalizes an inconsistent closed+minimized value on read", () => {
+    const map = new Map<string, string>([
+      [
+        "hermes.chat.v1",
+        JSON.stringify({
+          activeSessionId: "s1",
+          widgetOpen: false,
+          minimized: true,
+        }),
+      ],
+    ]);
+    const fakeStorage = {
+      getItem: (k: string) => map.get(k) ?? null,
+      setItem: () => {},
+      removeItem: () => {},
+    } as unknown as Storage;
+    // A closed widget can't be minimized — read() must repair the value.
+    expect(localStoragePersistence(fakeStorage).read()).toEqual({
+      activeSessionId: "s1",
+      widgetOpen: false,
+      minimized: false,
+    });
+  });
+
   it("degrades to a null-op when no storage is available", () => {
     const p = localStoragePersistence(null);
     expect(() =>

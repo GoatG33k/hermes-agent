@@ -159,13 +159,17 @@ export function localStoragePersistence(
         const raw = storage.getItem(STORAGE_KEY);
         if (!raw) return null;
         const parsed = JSON.parse(raw) as Partial<PersistedChatState>;
+        const widgetOpen = parsed.widgetOpen === true;
         return {
           activeSessionId:
             typeof parsed.activeSessionId === "string"
               ? parsed.activeSessionId
               : null,
-          widgetOpen: parsed.widgetOpen === true,
-          minimized: parsed.minimized === true,
+          widgetOpen,
+          // Normalize the invariant on read too: a closed widget can never be
+          // "minimized". This repairs corrupt or older persisted values that
+          // predate `closeWidget()` enforcing it.
+          minimized: widgetOpen && parsed.minimized === true,
         };
       } catch {
         return null;

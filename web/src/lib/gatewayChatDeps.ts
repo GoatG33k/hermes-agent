@@ -86,6 +86,18 @@ export function createGatewayChatDeps(
         gw = client;
         return client;
       })
+      .catch((e) => {
+        // Connect failed: dispose the partially-initialized client so we don't
+        // leak its socket/listeners, and leave `gw` null so the next call
+        // starts a fresh attempt. Re-throw so the caller sees the failure.
+        try {
+          client.close();
+        } catch {
+          /* already closed */
+        }
+        gw = null;
+        throw e;
+      })
       .finally(() => {
         connecting = null;
       });

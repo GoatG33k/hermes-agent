@@ -24,12 +24,14 @@ class FakeClient {
   requests: Array<{ method: string; params: unknown }> = [];
   connectCalls = 0;
   private resolveConnect!: () => void;
+  private rejectConnect!: (e: Error) => void;
   connectGate: Promise<void>;
 
   constructor() {
     FakeClient.instances.push(this);
-    this.connectGate = new Promise<void>((r) => {
-      this.resolveConnect = r;
+    this.connectGate = new Promise<void>((resolve, reject) => {
+      this.resolveConnect = resolve;
+      this.rejectConnect = reject;
     });
   }
   async connect() {
@@ -39,6 +41,9 @@ class FakeClient {
   }
   finishConnect() {
     this.resolveConnect();
+  }
+  failConnect(e: Error) {
+    this.rejectConnect(e);
   }
   close() {
     this.closed = true;
@@ -129,6 +134,28 @@ describe("createGatewayChatDeps", () => {
       (r) => r.method === "session.delete",
     );
     expect(req?.params).toEqual({ session_id: "stored-xyz" });
+  });
+
+  it("on connect rejection: disposes the failed client and retries fresh", async () => {
+    const deps = makeDeps();
+
+    // First attempt: connect rejects → the call should reject, the failed
+    // client must be closed, and `connecting` cleared.
+    const p1 = deps.createSession();
+    const first = FakeClient.instances[0]!;
+    first.failConnect(new Error("ws down"));
+    await expect(p1).rejects.toThrow("ws down");
+    expect(first.closed).toBe(true);
+
+    // Second attempt: a brand-new client is created (proving `connecting` and
+    // `gw` were reset) and succeeds.
+    const p2 = deps.createSession();
+    expect(FakeClient.instances).toHaveLength(2);
+    const second = FakeClient.instances[1]!;
+    second.finishConnect();
+    const created = await p2;
+    expect(created.id).toBe("stored-abc");
+    expect(second.closed).toBe(false);
   });
 
   it("maps REST session listings into ChatSession shape", async () => {
