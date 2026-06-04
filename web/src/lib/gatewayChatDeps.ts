@@ -1,0 +1,109 @@
+/**
+ * gatewayChatDeps — production wiring of `ChatStoreDeps` onto the real Hermes
+ * backend (the `tui_gateway` JSON-RPC server + the REST `/api/sessions*`
+ * endpoints).
+ *
+ * The store itself (see `chatStore.ts`) is transport-agnostic; this module is
+ * the single place that knows how to:
+ *
+ *   - open / reuse a `GatewayClient` WebSocket,
+ *   - call `session.create` (pinning a profile when one is requested),
+ *   - call `session.delete`,
+ *   - list sessions and read transcripts via the REST helpers in `lib/api`.
+ *
+ * Listing + transcript reads go through REST rather than the gateway because
+ * those endpoints are the historical session browser (`/api/sessions`,
+ * `/api/sessions/:id/messages`) and are cheaper than spinning gateway state.
+ * Creation + deletion go through the gateway so the live agent runtime stays
+ * in sync (a session created purely in the DB would have no running agent).
+ */
+
+import { api } from "@/lib/api";
+import type { SessionInfo, SessionMessage } from "@/lib/api";
+import { GatewayClient } from "@/lib/gatewayClient";
+import type {
+  ChatMessage,
+  ChatSession,
+  ChatStoreDeps,
+} from "@/lib/chatStore";
+
+function toChatSession(s: SessionInfo): ChatSession {
+  return {
+    id: s.id,
+    title: s.title,
+    profile: null, // server SessionInfo has no profile field today; config task fills this in
+    model: s.model,
+    createdAt: s.started_at,
+    lastActive: s.last_active,
+    preview: s.preview,
+    messageCount: s.message_count,
+  };
+}
+
+function toChatMessage(m: SessionMessage): ChatMessage {
+  return {
+    role: m.role,
+    content: m.content,
+    timestamp: m.timestamp,
+    toolName: m.tool_name,
+  };
+}
+
+/**
+ * Build the production deps bag. A single lazily-connected `GatewayClient` is
+ * shared for the app's lifetime; callers never see it.
+ */
+export function createGatewayChatDeps(): ChatStoreDeps {
+  let gw: GatewayClient | null = null;
+
+  async function gateway(): Promise<GatewayClient> {
+    if (gw && gw.state === "open") return gw;
+    gw = new GatewayClient();
+    await gw.connect();
+    return gw;
+  }
+
+  return {
+    async createSession(opts) {
+      const client = await gateway();
+      const params: Record<string, unknown> = {};
+      // `profile` is forwarded so the config task (t_07e02f30 — "accept a
+      // profile selection per session") can wire it through `session.create`.
+      // The gateway ignores unknown params today, so this is forward-compatible
+      // and harmless until that task lands.
+      if (opts?.profile) params.profile = opts.profile;
+      const created = await client.request<{
+        session_id: string;
+        // The DB-backed key the REST `/api/sessions*` endpoints key on. This —
+        // not the ephemeral gateway `session_id` — is what we must persist and
+        // list against, otherwise the new chat never shows up in the registry
+        // and its transcript can't be fetched later.
+        stored_session_id?: string;
+        title?: string | null;
+        info?: { model?: string | null };
+      }>("session.create", params);
+      return {
+        id: created.stored_session_id ?? created.session_id,
+        model: created.info?.model ?? null,
+        title: created.title ?? null,
+      };
+    },
+
+    async listSessions() {
+      // Pull a healthy page; the chat list rarely needs more than this and the
+      // store re-sorts client-side anyway.
+      const page = await api.getSessions(100, 0);
+      return page.sessions.map(toChatSession);
+    },
+
+    async deleteSession(id) {
+      const client = await gateway();
+      await client.request("session.delete", { session_id: id });
+    },
+
+    async loadMessages(id) {
+      const res = await api.getSessionMessages(id);
+      return res.messages.map(toChatMessage);
+    },
+  };
+}
