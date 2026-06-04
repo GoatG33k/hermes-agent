@@ -45,9 +45,15 @@
  *   bag. Production wires it to the real gateway client + REST `api`; tests
  *   inject fakes. The store never reaches for globals.
  *
- * - **Immutable snapshots.** `getSnapshot()` returns a frozen, referentially
- *   stable object that only changes identity when state actually changes, so
- *   React's `useSyncExternalStore` re-renders precisely.
+ * - **Stable, shallow-frozen snapshots.** `getSnapshot()` returns a
+ *   shallow-`Object.freeze`d, referentially stable object that only changes
+ *   identity when state actually changes, so React's `useSyncExternalStore`
+ *   re-renders precisely. The freeze is shallow (top-level only): nested
+ *   `sessions` / `messages` arrays and their elements are reused by reference
+ *   across snapshots and must be treated as read-only by consumers — never
+ *   mutate them in place. We deliberately do not deep-freeze on every update
+ *   to keep this hot path cheap; all internal mutations go through copy-on-
+ *   write in `setState`.
  */
 
 /** A chat session as the store tracks it. Mirrors the server's `SessionInfo`
@@ -291,16 +297,22 @@ export class ChatStore {
       });
     }
 
-    await this.refreshSessions();
+    const refreshed = await this.refreshSessions();
 
-    // Prune a dangling active id that no longer exists server-side.
-    const ids = new Set(this.state.sessions.map((s) => s.id));
-    if (this.state.activeSessionId && !ids.has(this.state.activeSessionId)) {
-      this.setState({ activeSessionId: null, messages: [] });
-      this.persist();
-    } else if (this.state.activeSessionId) {
-      // Re-load the active session's messages after a refresh.
-      await this.loadActiveMessages();
+    // Only reconcile the persisted active id against the server list if we
+    // actually fetched it. If the refresh failed, the empty `sessions` is not
+    // authoritative — pruning here would wrongly drop (and persist the loss of)
+    // a valid active session just because the network was down.
+    if (refreshed) {
+      const ids = new Set(this.state.sessions.map((s) => s.id));
+      if (this.state.activeSessionId && !ids.has(this.state.activeSessionId)) {
+        // Dangling active id that no longer exists server-side — prune it.
+        this.setState({ activeSessionId: null, messages: [] });
+        this.persist();
+      } else if (this.state.activeSessionId) {
+        // Re-load the active session's messages after a refresh.
+        await this.loadActiveMessages();
+      }
     }
 
     this.setState({ hydrated: true });
@@ -308,14 +320,18 @@ export class ChatStore {
 
   // ---- session registry ---------------------------------------------------
 
-  /** Pull the current session list from the server and merge it into state. */
-  async refreshSessions(): Promise<void> {
+  /** Pull the current session list from the server and merge it into state.
+   *  Returns true on success, false if the fetch failed (so callers like
+   *  `hydrate()` can avoid acting on an empty list they didn't actually get). */
+  async refreshSessions(): Promise<boolean> {
     this.setState({ loading: true, error: null });
     try {
       const sessions = await this.deps.listSessions();
       this.setState({ sessions: sortSessions(sessions), loading: false });
+      return true;
     } catch (e) {
       this.setState({ loading: false, error: errMsg(e) });
+      return false;
     }
   }
 
@@ -392,9 +408,11 @@ export class ChatStore {
     // Invalidate any in-flight load before switching, so a slow load for the
     // previous session (or for null) can't commit after this change. When
     // `id` is non-null, loadActiveMessages() below bumps the token again to
-    // its own value; clearing to null relies solely on this bump.
+    // its own value; clearing to null relies solely on this bump. Reset
+    // `loading` here too, since the invalidated load returns early without
+    // clearing it (otherwise a clear-to-null could leave `loading` stuck on).
     this.loadToken++;
-    this.setState({ activeSessionId: id, messages: [] });
+    this.setState({ activeSessionId: id, messages: [], loading: false });
     this.persist();
     if (id) await this.loadActiveMessages();
   }

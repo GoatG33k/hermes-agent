@@ -322,6 +322,33 @@ describe("ChatStore — messages per session", () => {
     expect(store.getSnapshot().activeSessionId).toBeNull();
     expect(store.getSnapshot().messages).toEqual([]);
   });
+
+  it("clearing the active session does not leave loading stuck on", async () => {
+    let resolveLoad!: (m: ChatMessage[]) => void;
+    const deps: ChatStoreDeps = {
+      async createSession() {
+        return { id: "s1" };
+      },
+      async listSessions() {
+        return [session("s1")];
+      },
+      async deleteSession() {},
+      loadMessages() {
+        return new Promise<ChatMessage[]>((r) => {
+          resolveLoad = r;
+        });
+      },
+    };
+    const store = new ChatStore(deps, makeMemoryPersistence());
+    await store.refreshSessions();
+
+    const load = store.selectSession("s1"); // load starts (loading=true), hangs
+    await store.selectSession(null); // clear
+    expect(store.getSnapshot().loading).toBe(false);
+    resolveLoad([]);
+    await load;
+    expect(store.getSnapshot().loading).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -397,6 +424,28 @@ describe("ChatStore — persistence across refresh", () => {
       "widgetOpen",
       "minimized",
     ]);
+  });
+
+  it("does not prune the persisted active session when the refresh fails", async () => {
+    const persistence = makeMemoryPersistence();
+    // First store: create + persist an active session against a healthy backend.
+    const backend = makeFakeBackend();
+    const store1 = new ChatStore(backend.deps, persistence);
+    const id = await store1.createSession();
+
+    // "Refresh": a brand-new store whose listSessions always fails (network
+    // down). Hydrate must NOT prune the persisted active id off an empty list
+    // it never actually fetched.
+    const failingDeps: ChatStoreDeps = {
+      ...backend.deps,
+      listSessions: () => Promise.reject(new Error("network down")),
+    };
+    const store2 = new ChatStore(failingDeps, persistence);
+    await store2.hydrate();
+
+    expect(store2.getSnapshot().activeSessionId).toBe(id);
+    expect(persistence.snapshot()?.activeSessionId).toBe(id);
+    expect(store2.getSnapshot().error).toBe("network down");
   });
 });
 

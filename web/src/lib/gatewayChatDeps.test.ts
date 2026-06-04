@@ -1,9 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // `gatewayChatDeps` imports `@/lib/api` (browser fetch/session plumbing) and
-// `@/lib/gatewayClient` (WebSocket). Mock both so the adapter logic — id
-// selection, profile forwarding, single-flight connect, leak-free reconnect —
-// can be exercised under the node test environment.
+// `@/lib/gatewayClient` (WebSocket). We mock `@/lib/api` because its functions
+// are called directly. `@/lib/gatewayClient` is NOT mocked: the real module has
+// no top-level side effects (it only imports the already-mocked `@/lib/api`),
+// and the adapter never constructs the real client here — `makeDeps()` injects
+// a FakeClient factory. This keeps the adapter logic (id selection, profile
+// forwarding, single-flight connect, leak-free reconnect) testable under node.
 
 const getSessions = vi.fn();
 const getSessionMessages = vi.fn();
