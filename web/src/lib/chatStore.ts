@@ -104,6 +104,8 @@ export interface ChatStoreState {
   minimized: boolean;
   /** Whether the initial server hydration has completed. */
   hydrated: boolean;
+  /** Available chat profiles loaded from the server. */
+  profiles: ChatProfile[];
 }
 
 /** Server-access surface the store depends on. Injected so the store has no
@@ -121,6 +123,16 @@ export interface ChatStoreDeps {
   deleteSession(id: string): Promise<void>;
   /** Fetch the full message transcript for a session. */
   loadMessages(id: string): Promise<ChatMessage[]>;
+  /** List available profiles for the chat profile selector. */
+  listProfiles(): Promise<ChatProfile[]>;
+}
+
+export interface ChatProfile {
+  name: string;
+  is_default: boolean;
+  model: string | null;
+  provider: string | null;
+  description?: string;
 }
 
 /** Persistence surface for the durable UI/navigation pointers. Defaults to
@@ -150,6 +162,7 @@ const INITIAL_STATE: ChatStoreState = Object.freeze({
   widgetOpen: false,
   minimized: false,
   hydrated: false,
+  profiles: [],
 });
 
 /** Build a `ChatStorePersistence` backed by the given `Storage` (or null when
@@ -326,6 +339,9 @@ export class ChatStore {
       }
     }
 
+    // Load available profiles for the profile selector.
+    await this.refreshProfiles();
+
     this.setState({ hydrated: true });
   }
 
@@ -401,6 +417,19 @@ export class ChatStore {
     } catch (e) {
       this.setState({ loading: false, error: errMsg(e) });
       return false;
+    }
+  }
+
+  /**
+   * Refresh the profile list from the server. Fails silently on error
+   * (profiles are cosmetic for the selector, not critical).
+   */
+  async refreshProfiles(): Promise<void> {
+    try {
+      const fetched = await this.deps.listProfiles();
+      this.setState({ profiles: fetched });
+    } catch {
+      // Profiles are non-critical for chat; fail silently.
     }
   }
 

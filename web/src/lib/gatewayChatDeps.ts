@@ -23,6 +23,7 @@ import type { SessionInfo, SessionMessage } from "@/lib/api";
 import { GatewayClient } from "@/lib/gatewayClient";
 import type {
   ChatMessage,
+  ChatProfile,
   ChatSession,
   ChatStoreDeps,
 } from "@/lib/chatStore";
@@ -157,6 +158,16 @@ export function createGatewayChatDeps(
     async loadMessages(id) {
       const res = await api.getSessionMessages(id);
       return res.messages.map(toChatMessage);
+    },
+
+    async listProfiles() {
+      const res = await api.getProfiles();
+      return res.profiles.map((p) => ({
+        name: p.name,
+        is_default: p.is_default,
+        model: p.model ?? null,
+        provider: p.provider ?? null,
+      }));
     },
   };
 }

@@ -29,12 +29,13 @@ import { Card } from "@nous-research/ui/ui/components/card";
 
 import { ModelPickerDialog } from "@/components/ModelPickerDialog";
 import { ToolCall, type ToolEntry } from "@/components/ToolCall";
+import { ChatProfilePicker } from "@/components/ChatProfilePicker";
 import { GatewayClient, type ConnectionState } from "@/lib/gatewayClient";
 import { HERMES_BASE_PATH, buildWsAuthParam } from "@/lib/api";
 
 import { cn } from "@/lib/utils";
 import { AlertCircle, ChevronDown, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 interface SessionInfo {
   cwd?: string;
@@ -83,11 +84,16 @@ export function ChatSidebar({ channel, className }: ChatSidebarProps) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const gw = useMemo(() => new GatewayClient(), [version]);
 
+  // Track latest profile in a ref so the effect closure always reads it.
+  const profileRef = useRef(profile);
+  profileRef.current = profile;
+
   const [state, setState] = useState<ConnectionState>("idle");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [info, setInfo] = useState<SessionInfo>({});
   const [tools, setTools] = useState<ToolEntry[]>([]);
   const [modelOpen, setModelOpen] = useState(false);
+  const [profile, setProfile] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -122,8 +128,9 @@ export function ChatSidebar({ channel, className }: ChatSidebarProps) {
         }
         // close_on_disconnect: the gateway reaps this sidecar session (and its
         // slash_worker subprocess) when the WS drops, instead of leaking it.
-        return gw.request<{ session_id: string }>("session.create", {
+        return gw.request<{ session_id: string; info?: { profile_name?: string } }>("session.create", {
           close_on_disconnect: true,
+          profile: profileRef.current ?? undefined,
         });
       })
       .then((created) => {
@@ -324,6 +331,18 @@ export function ChatSidebar({ channel, className }: ChatSidebarProps) {
           >
             <span className="truncate">{modelLabel}</span>
           </Button>
+        </div>
+
+        <div className="min-w-0">
+          <div className="text-display text-xs tracking-wider text-text-tertiary">
+            profile
+          </div>
+
+          <ChatProfilePicker
+            value={profile}
+            onChange={setProfile}
+            disabled={!canPickModel}
+          />
         </div>
 
         <Badge tone={STATE_TONE[state]}>{STATE_LABEL[state]}</Badge>
