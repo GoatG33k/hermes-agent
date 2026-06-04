@@ -111,8 +111,9 @@ export function createGatewayChatDeps(
       // `profile` is forwarded so the config task (t_07e02f30 — "accept a
       // profile selection per session") can wire it through `session.create`.
       // The gateway ignores unknown params today, so this is forward-compatible
-      // and harmless until that task lands.
-      if (opts?.profile) params.profile = opts.profile;
+      // and harmless until that task lands. Use an explicit null/undefined check
+      // (not truthiness) so a valid falsy profile id like "" is still forwarded.
+      if (opts?.profile != null) params.profile = opts.profile;
       const created = await client.request<{
         session_id: string;
         // The DB-backed session id (the `sessions.id` column). This is the id

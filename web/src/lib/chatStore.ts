@@ -326,8 +326,21 @@ export class ChatStore {
   async refreshSessions(): Promise<boolean> {
     this.setState({ loading: true, error: null });
     try {
-      const sessions = await this.deps.listSessions();
-      this.setState({ sessions: sortSessions(sessions), loading: false });
+      const fetched = await this.deps.listSessions();
+      // Merge rather than replace wholesale: preserve locally-known metadata
+      // that the server listing doesn't (yet) round-trip — notably `profile`,
+      // which is set at creation but absent from the server `SessionInfo`. For
+      // sessions we already know about, keep a non-null local `profile` when
+      // the fetched copy has none.
+      const prevById = new Map(this.state.sessions.map((s) => [s.id, s]));
+      const merged = fetched.map((s) => {
+        const prev = prevById.get(s.id);
+        if (prev && s.profile == null && prev.profile != null) {
+          return { ...s, profile: prev.profile };
+        }
+        return s;
+      });
+      this.setState({ sessions: sortSessions(merged), loading: false });
       return true;
     } catch (e) {
       this.setState({ loading: false, error: errMsg(e) });
@@ -440,10 +453,16 @@ export class ChatStore {
   }
 
   /**
-   * Append a message to the active session's in-memory transcript. Used for
-   * optimistic UI (the user's just-sent line, streamed assistant deltas)
-   * before the authoritative server copy lands. No-op if there is no active
-   * session.
+   * Append a single complete message to the active session's in-memory
+   * transcript. Intended for optimistic UI — e.g. echoing the user's
+   * just-sent line, or appending a finished assistant message — before the
+   * authoritative server copy lands. No-op if there is no active session.
+   *
+   * This is append-only: each call adds one message and bumps `messageCount`.
+   * It is NOT a streaming-delta accumulator — callers rendering token-by-token
+   * deltas should buffer them and append once the message completes (or manage
+   * the in-progress message in their own component state), otherwise the
+   * transcript and `messageCount` would inflate with partial fragments.
    */
   appendMessage(message: ChatMessage): void {
     if (!this.state.activeSessionId) return;

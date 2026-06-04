@@ -115,6 +115,17 @@ describe("createGatewayChatDeps", () => {
     expect(req?.params).toEqual({});
   });
 
+  it("forwards a valid falsy (empty-string) profile id", async () => {
+    const deps = makeDeps();
+    const p = deps.createSession({ profile: "" });
+    FakeClient.instances[0]?.finishConnect();
+    await p;
+    const req = FakeClient.instances[0]?.requests.find(
+      (r) => r.method === "session.create",
+    );
+    expect(req?.params).toEqual({ profile: "" });
+  });
+
   it("single-flights concurrent connects onto one client", async () => {
     const deps = makeDeps();
     // Fire two operations before the connection settles.

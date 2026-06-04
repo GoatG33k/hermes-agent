@@ -138,6 +138,21 @@ describe("ChatStore — session registry", () => {
     expect(store.getActiveSession()?.profile).toBe("minerva");
   });
 
+  it("preserves a locally-known profile across a server refresh", async () => {
+    // The server listing carries no profile (profile:null). A refresh must not
+    // clobber the profile we set locally at creation.
+    const created = await store.createSession({ profile: "minerva" });
+    // The fake backend's listSessions echoes its stored sessions; force the
+    // listed copy to have a null profile (as the real REST adapter does).
+    const stored = backend.sessions.get(created!);
+    if (stored) stored.profile = null;
+
+    await store.refreshSessions();
+
+    const after = store.getSnapshot().sessions.find((s) => s.id === created);
+    expect(after?.profile).toBe("minerva");
+  });
+
   it("deletes a session and removes it from the registry", async () => {
     const id = await store.createSession();
     expect(store.getSnapshot().sessions).toHaveLength(1);
