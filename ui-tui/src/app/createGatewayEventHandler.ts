@@ -11,7 +11,7 @@ import type {
 } from '../gatewayTypes.js'
 import { rpcErrorMessage } from '../lib/rpc.js'
 import { topLevelSubagents } from '../lib/subagentTree.js'
-import { formatAbandonedClarify, formatToolCall, stripAnsi } from '../lib/text.js'
+import { formatAbandonedClarify, formatToolCall, isThinkingStatus, stripAnsi } from '../lib/text.js'
 import { fromSkin } from '../theme.js'
 import type { Msg, SubagentProgress, SubagentStatus } from '../types.js'
 
@@ -442,7 +442,9 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
           scheduleThinkingStatus(value || statusFromBusy())
 
           if (value) {
-            turnController.recordReasoningDelta(value)
+            // Replace reasoning content with transient thinking status so it
+            // doesn't mush together and bloat the transcript.
+            turnController.recordReasoningDelta(value, true, true)
           }
         }
 
@@ -492,9 +494,13 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
         if (turnController.lastStatusNote !== p.text) {
           turnController.lastStatusNote = p.text
+
+          const replaceLabel = isThinkingStatus(p.text) ? 'Thinking' : undefined
+
           turnController.pushActivity(
             p.text,
-            p.kind === 'error' ? 'error' : p.kind === 'warn' || p.kind === 'approval' ? 'warn' : 'info'
+            p.kind === 'error' ? 'error' : p.kind === 'warn' || p.kind === 'approval' ? 'warn' : 'info',
+            replaceLabel
           )
         }
 

@@ -20,6 +20,7 @@ export const TOOL_VERBS: Record<string, string> = {
 }
 
 export const VERBS = [
+  'thinking',
   'pondering',
   'contemplating',
   'musing',

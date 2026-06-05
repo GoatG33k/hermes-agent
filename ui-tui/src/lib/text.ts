@@ -108,6 +108,9 @@ export const pasteTokenLabel = (text: string, lineCount: number) => {
 const THINKING_STATUS_RE = new RegExp(`^(?:${VERBS.join('|')})\\.{0,3}$`, 'i')
 const THINKING_STATUS_CHUNK_RE = new RegExp(`[^A-Za-z\n]+\\s*(?:${VERBS.join('|')})\\.{0,3}\\s*`, 'giu')
 
+export const isThinkingStatus = (text: string) =>
+  THINKING_STATUS_RE.test(text.replace(/\.\.\.$/, '').trim())
+
 export const cleanThinkingText = (reasoning: string) =>
   reasoning
     .split('\n')
@@ -277,12 +280,19 @@ export const splitToolDuration = (call: string) => {
 
 export const isTransientTrailLine = (line: string) => line.startsWith('drafting ') || line === 'analyzing tool output…'
 
-export const sameToolTrailGroup = (label: string, entry: string) =>
-  entry === `${label} ✓` ||
-  entry === `${label} ✗` ||
-  entry.startsWith(`${label}(`) ||
-  entry.startsWith(`${label} ::`) ||
-  entry.startsWith(`${label}:`)
+export const sameToolTrailGroup = (label: string, entry: string) => {
+  if (label === 'Thinking') {
+    return isThinkingStatus(entry)
+  }
+
+  return (
+    entry === `${label} ✓` ||
+    entry === `${label} ✗` ||
+    entry.startsWith(`${label}(`) ||
+    entry.startsWith(`${label} ::`) ||
+    entry.startsWith(`${label}:`)
+  )
+}
 
 export const lastCotTrailIndex = (trail: readonly string[]) => {
   for (let i = trail.length - 1; i >= 0; i--) {

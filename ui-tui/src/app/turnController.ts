@@ -561,7 +561,7 @@ class TurnController {
     this.pulseReasoningStreaming()
   }
 
-  recordReasoningDelta(text: string, force = false) {
+  recordReasoningDelta(text: string, force = false, replace = false) {
     if (this.interrupted || (!force && !getUiState().showReasoning)) {
       return
     }
@@ -570,15 +570,19 @@ class TurnController {
       this.flushStreamingSegment()
     }
 
-    this.reasoningText += text
-    this.activeReasoningText += text
+    if (replace) {
+      this.reasoningText = text
+      this.activeReasoningText = text
+    } else {
+      this.reasoningText += text
+      this.activeReasoningText += text
+    }
 
     if (this.reasoningText.length > 80_000) {
       this.reasoningText = this.reasoningText.slice(-60_000)
     }
 
     this.scheduleReasoning()
-    this.syncReasoningSegment()
     this.pulseReasoningStreaming()
   }
 
@@ -741,6 +745,8 @@ class TurnController {
         reasoning: this.reasoningText,
         reasoningTokens: estimateTokensRough(this.reasoningText)
       })
+      // Batch the expensive transcript/segment re-render too
+      this.syncReasoningSegment()
     }, STREAM_BATCH_MS)
   }
 
