@@ -249,13 +249,20 @@ export function ChatSidebar({ channel, className }: ChatSidebarProps) {
           return;
         }
 
-        setTools((prev) =>
-          prev.map((t) =>
+        setTools((prev) => {
+          // If the last tool is the one being updated (very common case),
+          // optimization: check last element first.
+          const last = prev[prev.length - 1];
+          if (last && last.status === "running" && last.name === p.name && last.preview === p.preview) {
+            return prev;
+          }
+          
+          return prev.map((t) =>
             t.status === "running" && t.name === p.name
               ? { ...t, preview: p.preview }
               : t,
-          ),
-        );
+          );
+        });
       } else if (type === "tool.complete") {
         const p = payload as
           | {
