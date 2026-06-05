@@ -1,6 +1,6 @@
 import { useStore } from '@nanostores/react'
 import type { ReactNode } from 'react'
-import { useCallback, useMemo } from 'react'
+import { useCallback, useEffect, useMemo } from 'react'
 
 import type { CommandCenterSection } from '@/app/command-center'
 import { GatewayMenuPanel } from '@/app/shell/gateway-menu-panel'
@@ -13,6 +13,7 @@ import {
   Hash,
   Loader2,
   Sparkles,
+  UserCircle,
   Zap,
   ZapFilled
 } from '@/lib/icons'
@@ -23,6 +24,7 @@ import { cn } from '@/lib/utils'
 import { setSessionYolo } from '@/lib/yolo-session'
 import { $desktopActionTasks } from '@/store/activity'
 import { $previewServerRestartStatus } from '@/store/preview'
+import { $activeProfile, $profiles, refreshActiveProfile, selectProfile } from '@/store/profile'
 import {
   $activeSessionId,
   $busy,
@@ -95,6 +97,13 @@ export function useStatusbarItems({
   const updateStatus = useStore($updateStatus)
   const updateApply = useStore($updateApply)
   const desktopVersion = useStore($desktopVersion)
+  const activeProfileName = useStore($activeProfile)
+  const profiles = useStore($profiles)
+
+  // Refresh the profile list and active profile once on mount.
+  useEffect(() => {
+    void refreshActiveProfile()
+  }, [])
 
   const contextUsage = useMemo(() => usageContextLabel(currentUsage), [currentUsage])
   const contextBar = useMemo(() => contextBarLabel(currentUsage), [currentUsage])
@@ -274,9 +283,24 @@ export function useStatusbarItems({
         title: 'Open cron jobs',
         to: CRON_ROUTE,
         variant: 'action'
+      },
+      {
+        icon: <UserCircle className="size-3" />,
+        id: 'profile-switcher',
+        label: activeProfileName,
+        menuItems: profiles.map(p => ({
+          id: p.name,
+          label: p.name,
+          detail: p.model ?? undefined,
+          className: activeProfileName === p.name ? 'font-medium text-foreground' : undefined,
+          onSelect: () => selectProfile(p.name)
+        })),
+        title: `Active profile: ${activeProfileName} — click to switch`,
+        variant: 'menu' as const
       }
     ],
     [
+      activeProfileName,
       agentsOpen,
       bgFailed,
       bgRunning,
@@ -287,6 +311,7 @@ export function useStatusbarItems({
       inferenceReady,
       inferenceStatus?.reason,
       openAgents,
+      profiles,
       subagentsRunning,
       toggleCommandCenter
     ]
