@@ -9486,8 +9486,19 @@ async def pty_ws(ws: WebSocket) -> None:
         # Stable per-server-session mux for the default chat view.
         mux_id = "default"
 
-    shared = await _pty_pool.get_or_spawn(mux_id, resume=resume, channel=channel)
-    if not shared:
+    try:
+        shared = await _pty_pool.get_or_spawn(mux_id, resume=resume, channel=channel)
+    except SystemExit as exc:
+        # _make_tui_argv calls sys.exit(1) when node/npm is missing.
+        await ws.send_text(f"\r\n\x1b[31mChat unavailable: {exc}\x1b[0m\r\n")
+        await ws.close(code=1011)
+        return
+    except PtyUnavailableError as exc:
+        await ws.send_text(f"\r\n\x1b[31mChat unavailable: {exc}\x1b[0m\r\n")
+        await ws.close(code=1011)
+        return
+    except (FileNotFoundError, OSError) as exc:
+        await ws.send_text(f"\r\n\x1b[31mChat failed to start: {exc}\x1b[0m\r\n")
         await ws.close(code=1011)
         return
 
@@ -9584,21 +9595,22 @@ class _PtyPool:
         self._pool: Dict[str, _SharedPty] = {}
         self._lock = asyncio.Lock()
 
-    async def get_or_spawn(self, mux_id: str, resume: str = "", channel: str = "") -> Optional[_SharedPty]:
+    async def get_or_spawn(self, mux_id: str, resume: str = "", channel: str = "") -> _SharedPty:
         async with self._lock:
             if mux_id in self._pool:
                 return self._pool[mux_id]
 
             sidecar_url = _build_sidecar_url(channel) if channel else None
-            try:
-                argv, cwd, env = _resolve_chat_argv(resume=resume or None, sidecar_url=sidecar_url)
-                bridge = PtyBridge.spawn(argv, cwd=cwd, env=env)
-                shared = _SharedPty(bridge, mux_id)
-                self._pool[mux_id] = shared
-                return shared
-            except Exception as exc:
-                _log.error("Failed to spawn PTY for mux_id=%s: %s", mux_id, exc)
-                return None
+            # _resolve_chat_argv calls sys.exit(1) (→ SystemExit) when node/npm
+            # is missing; PtyBridge.spawn raises PtyUnavailableError or OSError.
+            # All are re-raised so the caller can send a human-readable error to
+            # the WebSocket client before closing — same pattern as the old
+            # single-PTY path that had explicit try/except blocks.
+            argv, cwd, env = _resolve_chat_argv(resume=resume or None, sidecar_url=sidecar_url)
+            bridge = PtyBridge.spawn(argv, cwd=cwd, env=env)
+            shared = _SharedPty(bridge, mux_id)
+            self._pool[mux_id] = shared
+            return shared
 
     async def teardown(self, mux_id: str):
         async with self._lock:
