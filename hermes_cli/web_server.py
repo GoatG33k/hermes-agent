@@ -33,7 +33,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import yaml
 
@@ -8009,83 +8009,144 @@ async def pty_ws(ws: WebSocket) -> None:
         await ws.close(code=1011)
         return
 
-    # --- spawn PTY ------------------------------------------------------
-    resume = ws.query_params.get("resume") or None
+    # --- multiplex PTY or spawn -----------------------------------------
+    resume = ws.query_params.get("resume") or ""
     channel = _channel_or_close_code(ws)
-    sidecar_url = _build_sidecar_url(channel) if channel else None
 
-    try:
-        argv, cwd, env = _resolve_chat_argv(resume=resume, sidecar_url=sidecar_url)
-    except SystemExit as exc:
-        # _make_tui_argv calls sys.exit(1) when node/npm is missing.
-        await ws.send_text(f"\r\n\x1b[31mChat unavailable: {exc}\x1b[0m\r\n")
+    # If a channel is explicitly requested (from the frontend's sidecar),
+    # use it for muxing. If we're resuming a specific session, mux by that.
+    # Otherwise, default to "main" so multiple tabs of the same dashboard
+    # session stay in sync.
+    if resume:
+        mux_id = f"res-{resume}"
+    elif channel:
+        mux_id = f"ch-{channel}"
+    else:
+        # Stable per-server-session mux for the default chat view.
+        mux_id = "default"
+
+    shared = await _pty_pool.get_or_spawn(mux_id, resume=resume, channel=channel)
+    if not shared:
         await ws.close(code=1011)
         return
 
+    await shared.attach(ws)
 
-    try:
-        bridge = PtyBridge.spawn(argv, cwd=cwd, env=env)
-    except PtyUnavailableError as exc:
-        await ws.send_text(f"\r\n\x1b[31mChat unavailable: {exc}\x1b[0m\r\n")
-        await ws.close(code=1011)
-        return
-    except (FileNotFoundError, OSError) as exc:
-        await ws.send_text(f"\r\n\x1b[31mChat failed to start: {exc}\x1b[0m\r\n")
-        await ws.close(code=1011)
-        return
 
-    loop = asyncio.get_running_loop()
+class _SharedPty:
+    """A single PtyBridge shared by multiple WebSocket clients.
 
-    # --- reader task: PTY master → WebSocket ----------------------------
-    async def pump_pty_to_ws() -> None:
-        while True:
-            chunk = await loop.run_in_executor(
-                None, bridge.read, _PTY_READ_CHUNK_TIMEOUT
-            )
-            if chunk is None:  # EOF
-                return
-            if not chunk:  # no data this tick; yield control and retry
-                await asyncio.sleep(0)
-                continue
-            try:
-                await ws.send_bytes(chunk)
-            except Exception:
-                return
+    Broadcasts PTY output (master fd) to every attached client and filters
+    incoming resize escapes to the largest requested grid.
+    """
 
-    reader_task = asyncio.create_task(pump_pty_to_ws())
+    def __init__(self, bridge: PtyBridge, mux_id: str):
+        self.bridge = bridge
+        self.mux_id = mux_id
+        self.clients: Set[WebSocket] = set()
+        self.reader_task: Optional[asyncio.Task] = None
+        self.cols = 80
+        self.rows = 24
+        self._lock = asyncio.Lock()
 
-    # --- writer loop: WebSocket → PTY master ----------------------------
-    try:
-        while True:
-            msg = await ws.receive()
-            msg_type = msg.get("type")
-            if msg_type == "websocket.disconnect":
-                break
-            raw = msg.get("bytes")
-            if raw is None:
-                text = msg.get("text")
-                raw = text.encode("utf-8") if isinstance(text, str) else b""
-            if not raw:
-                continue
+    async def attach(self, ws: WebSocket):
+        async with self._lock:
+            self.clients.add(ws)
+            if self.reader_task is None:
+                self.reader_task = asyncio.create_task(self._pump())
 
-            # Resize escape is consumed locally, never written to the PTY.
-            match = _RESIZE_RE.match(raw)
-            if match and match.end() == len(raw):
-                cols = int(match.group(1))
-                rows = int(match.group(2))
-                bridge.resize(cols=cols, rows=rows)
-                continue
-
-            bridge.write(raw)
-    except WebSocketDisconnect:
-        pass
-    finally:
-        reader_task.cancel()
         try:
-            await reader_task
-        except (asyncio.CancelledError, Exception):
+            while True:
+                msg = await ws.receive()
+                msg_type = msg.get("type")
+                if msg_type == "websocket.disconnect":
+                    break
+                
+                raw = msg.get("bytes")
+                if raw is None:
+                    text = msg.get("text")
+                    raw = text.encode("utf-8") if isinstance(text, str) else b""
+                if not raw:
+                    continue
+
+                # Resize escape: update our shared dims if it's a growth.
+                match = _RESIZE_RE.match(raw)
+                if match and match.end() == len(raw):
+                    cols = int(match.group(1))
+                    rows = int(match.group(2))
+                    if cols > self.cols or rows > self.rows:
+                        self.cols = max(self.cols, cols)
+                        self.rows = max(self.rows, rows)
+                        self.bridge.resize(cols=self.cols, rows=self.rows)
+                    continue
+
+                self.bridge.write(raw)
+        except WebSocketDisconnect:
             pass
-        bridge.close()
+        finally:
+            async with self._lock:
+                self.clients.discard(ws)
+                if not self.clients:
+                    await _pty_pool.teardown(self.mux_id)
+
+    async def _pump(self):
+        """PTY master → all WebSockets."""
+        loop = asyncio.get_running_loop()
+        try:
+            while True:
+                chunk = await loop.run_in_executor(None, self.bridge.read, _PTY_READ_CHUNK_TIMEOUT)
+                if chunk is None:  # EOF
+                    break
+                if not chunk:
+                    await asyncio.sleep(0)
+                    continue
+
+                # Broadcast to every client concurrently.
+                async with self._lock:
+                    subs = list(self.clients)
+                
+                if not subs:
+                    break
+
+                for sub in subs:
+                    try:
+                        await sub.send_bytes(chunk)
+                    except Exception:
+                        # Client disappeared mid-send; attach loop will clean it up.
+                        pass
+        finally:
+            self.bridge.close()
+
+
+class _PtyPool:
+    def __init__(self):
+        self._pool: Dict[str, _SharedPty] = {}
+        self._lock = asyncio.Lock()
+
+    async def get_or_spawn(self, mux_id: str, resume: str = "", channel: str = "") -> Optional[_SharedPty]:
+        async with self._lock:
+            if mux_id in self._pool:
+                return self._pool[mux_id]
+
+            sidecar_url = _build_sidecar_url(channel) if channel else None
+            try:
+                argv, cwd, env = _resolve_chat_argv(resume=resume or None, sidecar_url=sidecar_url)
+                bridge = PtyBridge.spawn(argv, cwd=cwd, env=env)
+                shared = _SharedPty(bridge, mux_id)
+                self._pool[mux_id] = shared
+                return shared
+            except Exception as exc:
+                _log.error("Failed to spawn PTY for mux_id=%s: %s", mux_id, exc)
+                return None
+
+    async def teardown(self, mux_id: str):
+        async with self._lock:
+            shared = self._pool.pop(mux_id, None)
+            if shared and shared.reader_task:
+                shared.reader_task.cancel()
+
+
+_pty_pool = _PtyPool()
 
 
 # ---------------------------------------------------------------------------
