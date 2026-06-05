@@ -102,11 +102,8 @@ export async function startPromptLiveSession({
     return null
   }
 
-  // Let the backend-created session key (YYYYMMDD_HHMMSS_xxxxxx) remain
-  // the initial title. Auto-title generation can rename it after the first
-  // response; pre-queuing prompt text here causes duplicate-title errors when
-  // users dispatch common prompts like "Hello, what model are you?".
-  const sid = (await newLiveSession('new live session started')) ?? null
+  // Reuse current session if it exists, otherwise start a new one.
+  const sid = getUiState().sid || (await newLiveSession('new live session started')) ?? null
 
   if (!sid) {
     sys('error: failed to start new live session')
