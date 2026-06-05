@@ -103,7 +103,7 @@ export async function startPromptLiveSession({
   }
 
   // Reuse current session if it exists, otherwise start a new one.
-  const sid = getUiState().sid || (await newLiveSession('new live session started')) ?? null
+  const sid = getUiState().sid || ((await newLiveSession('new live session started')) ?? null)
 
   if (!sid) {
     sys('error: failed to start new live session')
